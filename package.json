@@ -1,8 +1,9 @@
 {
   "name": "obsidian-catego",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Catego — argument-mapping canvas plugin for Obsidian",
   "main": "main.js",
+  "type": "module",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production"
@@ -14,19 +15,19 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@dagrejs/dagre": "^3.0.0",
-    "dompurify": "^3.4.10",
-    "jspdf": "^4.2.1",
-    "katex": "^0.16.45",
-    "marked": "^18.0.5",
-    "perfect-freehand": "^1.2.3",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "@dagrejs/dagre": "3.0.0",
+    "dompurify": "3.4.10",
+    "jspdf": "4.2.1",
+    "katex": "0.16.45",
+    "marked": "18.0.5",
+    "perfect-freehand": "1.2.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
-    "esbuild": "^0.21.5",
-    "obsidian": "latest",
-    "typescript": "^5.4.5"
+    "@types/node": "20.19.43",
+    "esbuild": "0.21.5",
+    "obsidian": "1.13.1",
+    "typescript": "5.9.3"
   }
 }

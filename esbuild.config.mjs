@@ -5,13 +5,24 @@ import path from 'path';
 
 const prod = process.argv.includes('production');
 
-// Force every react import to a single copy (two React instances → "useRef of null").
-const R = (p) => path.resolve(process.cwd(), 'node_modules', p);
-const reactAlias = {
-  react: R('react'),
-  'react-dom': R('react-dom'),
-  'react-dom/client': R('react-dom/client'),
-  'react/jsx-runtime': R('react/jsx-runtime'),
+// Resolve every runtime dependency from this package's own node_modules, so the
+// bundle is exactly what package-lock.json describes (and a single React copy).
+//
+// This re-resolves the import AS A PACKAGE from here (honouring its `exports` /
+// `browser` fields). A plain path alias would not: it resolves a directory via
+// `main`, which e.g. hands `marked` its UMD build and leaves the named import
+// undefined.
+const pkgDeps = Object.keys(JSON.parse(fs.readFileSync('package.json', 'utf8')).dependencies || {});
+const pinDeps = {
+  name: 'pin-deps',
+  setup(build) {
+    const esc = (d) => d.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+    const filter = new RegExp(`^(?:${pkgDeps.map(esc).join('|')})(?:/.*)?$`);
+    build.onResolve({ filter }, (args) => {
+      if (args.pluginData?.pinned) return undefined;   // our own re-entry → default resolution
+      return build.resolve(args.path, { resolveDir: process.cwd(), kind: args.kind, pluginData: { pinned: true } });
+    });
+  },
 };
 
 // canvas.css ships as the plugin's styles.css.
@@ -73,7 +84,7 @@ const ctx = await esbuild.context({
   target: 'es2020',
   platform: 'browser',
   jsx: 'automatic',
-  alias: reactAlias,
+  plugins: [pinDeps],
   loader: {
     '.css': 'empty',   // CSS imported from JS (canvas.css, katex.css) ships via styles.css instead
     '.png': 'dataurl',

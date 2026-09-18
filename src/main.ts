@@ -24,7 +24,7 @@ export default class CategoPlugin extends Plugin {
     // Add the active file (note, PDF, image, …) as a node in the open board.
     this.addCommand({
       id: 'note-to-node',
-      name: 'Add this file as a node in the open Catego board',
+      name: 'Add this file as a node in the open board',
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         const view = this.activeCategoView();

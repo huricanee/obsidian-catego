@@ -35,8 +35,8 @@ Markdown and LaTeX (KaTeX) inside nodes.
 ## Any file as a node
 
 Drag a file from the file explorer onto a board, right-click it →
-**Add as Catego node**, or run **Add this file as a node in the open Catego
-board**. Works for notes, PDFs, images, audio, other boards — anything in the
+**Add as Catego node**, or run the command **Add this file as a node in the
+open board**. Works for notes, PDFs, images, audio, other boards — anything in the
 vault. The node shows the file name; its link button opens the file in a new
 tab. Renaming the file renames the node, and vice versa.
 
