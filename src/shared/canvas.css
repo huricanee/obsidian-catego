@@ -1,0 +1,1782 @@
+/* ============================================================
+   Canvas wrapper - fills the viewport, clips overflow
+   ============================================================ */
+.canvas-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  /* Nebula ambient gradient behind everything */
+  background:
+    radial-gradient(ellipse 60% 50% at 30% 40%, rgba(207, 123, 240, 0.04) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 60% at 70% 60%, rgba(218, 119, 242, 0.03) 0%, transparent 70%),
+    var(--bg);
+}
+
+.canvas-root.panning {
+  cursor: grabbing;
+}
+
+/* Dot grid - rendered as a CSS background on the root */
+.canvas-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  transition: opacity 0.2s ease;
+}
+
+/* ============================================================
+   Transform layer - holds nodes + SVG arrows
+   ============================================================ */
+.canvas-transform {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
+
+/* ============================================================
+   SVG arrow layer
+   ============================================================ */
+.arrow-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.arrow-path {
+  fill: none;
+  stroke-width: 2;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.arrow-path-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.arrow-path.selected {
+  stroke-width: 3;
+  filter: drop-shadow(0 0 4px currentColor);
+}
+
+.arrow-path.preview {
+  stroke-dasharray: 8 6;
+  opacity: 0.6;
+}
+
+.arrow-marker {
+  fill: currentColor;
+}
+
+/* ============================================================
+   Arrow labels
+   ============================================================ */
+.arrow-label {
+  display: inline-block;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  max-width: 160px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-width: 20px;
+  cursor: default;
+  user-select: none;
+  pointer-events: all;
+}
+
+.arrow-label.editing {
+  outline: 1px solid var(--accent);
+  cursor: text;
+  user-select: text;
+}
+
+.arrow-label:empty:not(.editing) {
+  display: none;
+}
+
+/* Editable weight (1–100) inside the widened probability-shift pill. */
+.arrow-weight {
+  width: 100%;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 13px/30px ui-sans-serif, system-ui, sans-serif;
+  text-align: center;
+  cursor: text;
+  user-select: text;
+  outline: none;
+  pointer-events: all;
+}
+
+/* ============================================================
+   Nodes
+   ============================================================ */
+.node-layer {
+  position: relative;
+  z-index: 2;
+}
+
+.wb-node {
+  position: absolute;
+  border-radius: 20px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  box-sizing: border-box;
+  cursor: grab;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 16px;
+  transition: box-shadow 0.2s ease, border-color 0.15s ease;
+  z-index: 2;
+  overflow: visible;
+}
+
+.wb-node.text-node {
+  background: transparent;
+  border-color: transparent;
+  border-radius: 4px;
+  padding: 4px 8px;
+  min-height: 20px;
+  margin-left: 0;
+  margin-top: 0;
+}
+
+/* Figure nodes (rect / square / circle / triangle): transparent container,
+   the shape is drawn by an SVG layer behind the (optional) centered text. */
+.wb-node.figure-node {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  border-radius: 0;
+}
+.wb-node.figure-node .node-figure {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+  overflow: visible;
+}
+.wb-node.figure-node .node-text,
+.wb-node.figure-node .node-text-rendered {
+  position: relative;
+  z-index: 1;
+}
+
+/* ============================================================
+   Vim-mode indicator
+   ============================================================ */
+.mode-badge {
+  position: fixed;
+  bottom: 12px;
+  right: 12px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.12em;
+  user-select: none;
+  pointer-events: none;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  border: 1.5px solid;
+}
+.mode-badge.mode-dev {
+  background: #161a24;
+  border-color: #cf7bf0;
+  color: #cf7bf0;
+}
+.mode-badge.mode-edit {
+  background: #20140e;
+  border-color: #ffb54a;
+  color: #ffb54a;
+}
+
+/* ---- Argument-mapping: arrow midpoint pills act as connection junctions ---- */
+.arrow-pill {
+  cursor: pointer;
+}
+/* Inner glyph elements shouldn't intercept clicks; only the outer
+   rect/circle (the visible body of the pill) is the hit target. */
+.arrow-pill > line,
+.arrow-pill > polyline,
+.arrow-pill > polygon,
+.arrow-pill > text {
+  pointer-events: none;
+}
+
+/* Pill anchor dots (top/right/bottom/left) — drag from these to spawn
+   new arrows out of a pill. Hidden by default, fade in on hover/select. */
+.arrow-pill .pill-anchor {
+  opacity: 0;
+  cursor: crosshair;
+  transition: opacity 0.15s ease, r 0.12s ease;
+  pointer-events: all;
+}
+.arrow-pill:hover .pill-anchor,
+.arrow-pill.selected .pill-anchor {
+  opacity: 1;
+}
+.arrow-pill .pill-anchor:hover {
+  r: 5.5;
+}
+
+/* ---- Argument-mapping: typed nodes ---- */
+.wb-node.kinded {
+  border-width: 1.5px;
+}
+.node-kind-label {
+  position: absolute;
+  left: 0;
+  top: -18px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+
+/* Status pill — epistemic state, left-aligned just below the node. Font
+   matches the kind label (.node-kind-label) above the node. */
+.node-status {
+  position: absolute;
+  left: 0;
+  bottom: -26px;
+  padding: 1px 9px;
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: #0e0e10;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Open-note button (Obsidian plugin) — top-right corner of a note-backed node. */
+.node-note-open {
+  position: absolute;
+  top: -11px;
+  right: -11px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--accent);
+  cursor: pointer;
+  z-index: 3;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+.node-note-open:hover { border-color: var(--accent); transform: scale(1.12); }
+
+/* NOT modifier badge — top-right corner, semantic negation. */
+.node-not-badge {
+  position: absolute;
+  top: -28px;
+  right: -10px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #ff6b6b;
+  color: #fff;
+  font: 900 24px/1 ui-sans-serif, system-ui, sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Nudge the glyph slightly so it sits visually centered (¬ baseline is high). */
+  padding-bottom: 2px;
+  pointer-events: none;
+  user-select: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45), 0 0 0 2px #0e0e10;
+  z-index: 6;
+}
+
+/* Probability pill — top-right corner, editable percentage. When the NOT
+   badge is also present, the pill shifts left to sit beside it. */
+.node-prob-pill {
+  position: absolute;
+  top: -28px;
+  right: -10px;
+  min-width: 38px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #15171c;
+  border: 1.5px solid rgba(255, 255, 255, 0.35);
+  color: rgba(230, 230, 240, 0.95);
+  font: 700 11px/22px ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.02em;
+  text-align: center;
+  cursor: text;
+  user-select: text;
+  outline: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  z-index: 5;
+  white-space: nowrap;
+}
+.node-prob-pill.offset-not {
+  right: 18px;     /* shift left to make room for the NOT badge (22px wide, 4px gap) */
+}
+.node-prob-pill:focus {
+  border-color: #cf7bf0;
+}
+
+
+
+.wb-node.text-node .node-text {
+  text-align: left;
+  font-size: 14px;
+}
+
+.wb-node.text-node.selected {
+  border-color: rgba(207, 123, 240, 0.3);
+}
+
+.wb-node:hover {
+  z-index: 3;
+}
+
+.wb-node.selected {
+  z-index: 4;
+}
+
+.wb-node.dragging {
+  cursor: grabbing;
+  z-index: 5;
+  transition: none;
+}
+
+.wb-node.in-selection {
+  z-index: 4;
+  outline: 2px solid rgba(207, 123, 240, 0.6);
+  outline-offset: 2px;
+}
+
+.wb-node .node-text {
+  width: 100%;
+  text-align: center;
+  outline: none;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
+  min-height: 1.5em;
+  cursor: text;
+}
+
+.wb-node .node-text[contenteditable="false"] {
+  cursor: grab;
+}
+
+.wb-node .node-text::selection {
+  background: rgba(207, 123, 240, 0.35);
+}
+
+/* Resize handles - corner dots for resizing nodes */
+.resize-handle {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: var(--accent);
+  border-radius: 2px;
+  z-index: 10;
+  opacity: 0.7;
+  pointer-events: all;
+}
+.resize-handle:hover {
+  opacity: 1;
+  transform: scale(1.3);
+}
+.resize-handle.nw { top: -4px; left: -4px; cursor: nwse-resize; }
+.resize-handle.ne { top: -4px; right: -4px; cursor: nesw-resize; }
+.resize-handle.sw { bottom: -4px; left: -4px; cursor: nesw-resize; }
+.resize-handle.se { bottom: -4px; right: -4px; cursor: nwse-resize; }
+
+.wb-node .node-text:empty::before {
+  content: "Type here...";
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+/* LaTeX rendered view */
+.wb-node .node-text-rendered {
+  cursor: pointer;
+  /* The HTML controls layout — collapse the trailing newlines marked emits
+     (under the inherited pre-wrap they'd show as an empty bottom line). */
+  white-space: normal;
+}
+
+/* Markdown elements inside a node — tighten spacing so they read as node
+   content, not a document. Alignment is inherited from the node's text-align. */
+.wb-node .node-text-rendered > :first-child { margin-top: 0; }
+.wb-node .node-text-rendered > :last-child { margin-bottom: 0; }
+.wb-node .node-text-rendered p { margin: 0 0 0.35em; }
+.wb-node .node-text-rendered h1,
+.wb-node .node-text-rendered h2,
+.wb-node .node-text-rendered h3,
+.wb-node .node-text-rendered h4 { margin: 0.2em 0 0.3em; line-height: 1.2; font-weight: 700; }
+.wb-node .node-text-rendered h1 { font-size: 1.5em; }
+.wb-node .node-text-rendered h2 { font-size: 1.3em; }
+.wb-node .node-text-rendered h3 { font-size: 1.15em; }
+.wb-node .node-text-rendered ul,
+.wb-node .node-text-rendered ol { margin: 0.2em 0; padding-left: 1.4em; text-align: left; }
+/* Explicit markers — host themes (e.g. Obsidian) often reset `list-style: none`. */
+.wb-node .node-text-rendered ul { list-style: disc outside; }
+.wb-node .node-text-rendered ol { list-style: decimal outside; }
+.wb-node .node-text-rendered li { margin: 0.1em 0; list-style: inherit; display: list-item; }
+/* Task-list items: marked sometimes emits class="task-list-item", but newer
+   versions don't — match by the contained <input type="checkbox"> instead so
+   the default bullet is suppressed in both cases. */
+.wb-node .node-text-rendered li.task-list-item,
+.wb-node .node-text-rendered li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.2em;
+}
+.wb-node .node-text-rendered input[type="checkbox"] {
+  margin-right: 0.45em;
+  accent-color: var(--accent);
+  cursor: pointer;
+  vertical-align: -0.1em;
+}
+.wb-node .node-text-rendered a { color: var(--accent); text-decoration: underline; }
+.wb-node .node-text-rendered code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.05em 0.35em;
+  border-radius: 4px;
+}
+.wb-node .node-text-rendered pre {
+  margin: 0.3em 0;
+  padding: 0.5em 0.7em;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 6px;
+  text-align: left;
+  overflow-x: auto;
+}
+.wb-node .node-text-rendered pre code { background: none; padding: 0; }
+.wb-node .node-text-rendered blockquote {
+  margin: 0.3em 0;
+  padding-left: 0.7em;
+  border-left: 3px solid var(--accent);
+  opacity: 0.85;
+  text-align: left;
+}
+.wb-node .node-text-rendered hr { border: none; border-top: 1px solid var(--border); margin: 0.4em 0; }
+.wb-node .node-text-rendered table { border-collapse: collapse; margin: 0.3em auto; }
+.wb-node .node-text-rendered th,
+.wb-node .node-text-rendered td { border: 1px solid var(--border); padding: 0.2em 0.5em; }
+.wb-node .node-text-rendered strong { font-weight: 700; }
+.wb-node .node-text-rendered em { font-style: italic; }
+.wb-node .node-text-rendered del { text-decoration: line-through; opacity: 0.7; }
+
+.wb-node .node-text-rendered .katex {
+  font-size: 1.1em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Display math: KaTeX positions fraction numerators with negative offsets
+   relative to the baseline. The default line-height:1.5 from .node-text
+   clips the top. Override to line-height:normal and add padding so the
+   full formula is visible. */
+.wb-node .node-text-rendered .katex-display {
+  margin: 0;
+  padding: 0.3em 0;
+  text-align: inherit !important;
+  line-height: normal;
+}
+
+.wb-node .node-text-rendered .katex-display > .katex {
+  text-align: inherit !important;
+  line-height: normal;
+}
+
+/* ============================================================
+   Region layer — rectangular areas behind nodes
+   ============================================================ */
+.region-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* Above the full-screen select-hit-layer (z 0) so region borders/anchors
+     stay clickable in the select tool; still below nodes (z 2). The region
+     body is pointer-events:none, so clicks in its interior fall through to
+     the select-hit-layer for rect-select. */
+  z-index: 1;
+}
+
+.wb-region {
+  position: absolute;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--region-color) 8%, transparent);
+  border: 3px solid var(--region-color);
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.wb-region.selected {
+  border-style: solid;
+  box-shadow: 0 0 16px 2px color-mix(in srgb, var(--region-color) 30%, transparent);
+}
+
+.region-label {
+  position: absolute;
+  top: -24px;
+  left: 0;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  outline: none;
+  background: transparent;
+  pointer-events: all;
+  cursor: text;
+  min-width: 20px;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.region-label:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.region-label:focus {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.region-label:empty::before {
+  content: "Label...";
+  opacity: 0.3;
+}
+
+.region-lock {
+  position: absolute;
+  top: -22px;
+  right: 0;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.85;
+  user-select: none;
+  cursor: pointer;
+  pointer-events: all;
+  z-index: 5;
+}
+.region-lock:hover { opacity: 1; transform: scale(1.15); }
+
+.region-border-hit {
+  position: absolute;
+  inset: -8px;
+  border: 12px solid transparent;
+  border-radius: 12px;
+  pointer-events: all;
+  cursor: grab;
+  box-sizing: border-box;
+}
+
+.region-border-hit:active {
+  cursor: grabbing;
+}
+
+/* Region side-midpoint anchor dots — drag from these to create an arrow
+   into/out of the region. Hidden by default, shown on hover/selection. */
+.region-anchor-dot {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--surface, #0e0e10);
+  opacity: 0;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  cursor: crosshair;
+  z-index: 11;
+  pointer-events: all;
+}
+.wb-region:hover .region-anchor-dot,
+.wb-region.selected .region-anchor-dot {
+  opacity: 1;
+}
+.region-anchor-dot:hover {
+  transform: scale(1.4);
+}
+.region-anchor-dot.top    { top: -7px;    left: 50%; transform: translateX(-50%); }
+.region-anchor-dot.right  { right: -7px;  top: 50%;  transform: translateY(-50%); }
+.region-anchor-dot.bottom { bottom: -7px; left: 50%; transform: translateX(-50%); }
+.region-anchor-dot.left   { left: -7px;   top: 50%;  transform: translateY(-50%); }
+.wb-region:hover .region-anchor-dot.top:hover,
+.wb-region.selected .region-anchor-dot.top:hover    { transform: translateX(-50%) scale(1.4); }
+.wb-region:hover .region-anchor-dot.bottom:hover,
+.wb-region.selected .region-anchor-dot.bottom:hover { transform: translateX(-50%) scale(1.4); }
+.wb-region:hover .region-anchor-dot.left:hover,
+.wb-region.selected .region-anchor-dot.left:hover   { transform: translateY(-50%) scale(1.4); }
+.wb-region:hover .region-anchor-dot.right:hover,
+.wb-region.selected .region-anchor-dot.right:hover  { transform: translateY(-50%) scale(1.4); }
+
+/* ============================================================
+   Bezier control handles (Illustrator-style) on selected arrow
+   ============================================================ */
+.arrow-handle-leash {
+  stroke: #7da2ff;
+  stroke-dasharray: 4 3;
+  opacity: 0.8;
+  pointer-events: none;
+}
+.arrow-handle {
+  fill: #0e0e10;
+  stroke: #7da2ff;
+  stroke-width: 2;
+  cursor: grab;
+  pointer-events: all;
+  vector-effect: non-scaling-stroke;
+}
+.arrow-handle:hover {
+  fill: #7da2ff;
+}
+.arrow-handle:active {
+  cursor: grabbing;
+}
+
+/* ============================================================
+   Anchor dots
+   ============================================================ */
+.anchor-dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--surface);
+  opacity: 0;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  cursor: crosshair;
+  z-index: 10;
+  pointer-events: all;
+}
+
+.wb-node:hover .anchor-dot,
+.wb-node.selected .anchor-dot {
+  opacity: 1;
+}
+
+.anchor-dot:hover {
+  transform: scale(1.4);
+}
+
+.anchor-dot.top    { top: -5px;   left: 50%;  transform: translateX(-50%); }
+.anchor-dot.right  { right: -5px; top: 50%;   transform: translateY(-50%); }
+.anchor-dot.bottom { bottom: -5px;left: 50%;  transform: translateX(-50%); }
+.anchor-dot.left   { left: -5px;  top: 50%;   transform: translateY(-50%); }
+
+.wb-node:hover .anchor-dot.top:hover,
+.wb-node.selected .anchor-dot.top:hover    { transform: translateX(-50%) scale(1.4); }
+.wb-node:hover .anchor-dot.right:hover,
+.wb-node.selected .anchor-dot.right:hover  { transform: translateY(-50%) scale(1.4); }
+.wb-node:hover .anchor-dot.bottom:hover,
+.wb-node.selected .anchor-dot.bottom:hover { transform: translateX(-50%) scale(1.4); }
+.wb-node:hover .anchor-dot.left:hover,
+.wb-node.selected .anchor-dot.left:hover   { transform: translateY(-50%) scale(1.4); }
+
+/* ============================================================
+   Toolbar
+   ============================================================ */
+.toolbar {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--toolbar-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* Add-mode chip — shown bottom-centre while an object type is armed. */
+.add-mode-chip {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 12px;
+  background: var(--toolbar-bg);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
+  font: 600 12px ui-sans-serif, system-ui, sans-serif;
+  color: var(--text);
+  text-transform: capitalize;
+}
+.add-mode-chip kbd {
+  font: 600 11px ui-monospace, Menlo, monospace;
+  color: var(--accent);
+  background: rgba(207, 123, 240, 0.12);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 6px;
+  text-transform: none;
+}
+.add-mode-chip button {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  opacity: 0.6;
+  cursor: pointer;
+  font-size: 13px;
+}
+.add-mode-chip button:hover { opacity: 1; }
+
+/* DSL import modal. */
+.dsl-card {
+  width: min(680px, 94vw);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px 20px;
+  background: var(--toolbar-bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+.dsl-textarea {
+  width: 100%;
+  min-height: 240px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  background: #0c0c12;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  outline: none;
+  white-space: pre;
+  tab-size: 2;
+}
+.dsl-textarea:focus { border-color: var(--accent); }
+.dsl-help {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text);
+  opacity: 0.6;
+}
+.dsl-help code {
+  font-family: ui-monospace, Menlo, monospace;
+  background: rgba(207, 123, 240, 0.12);
+  color: var(--accent);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.dsl-result { display: flex; flex-direction: column; gap: 3px; max-height: 120px; overflow-y: auto; }
+.dsl-ok  { color: #8be0a8; font-size: 12.5px; }
+.dsl-err { color: #ff8aa1; font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+.dsl-actions { display: flex; justify-content: flex-end; gap: 10px; align-items: center; }
+.dsl-generate {
+  padding: 8px 20px;
+  border: none;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #1a0f24;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+.dsl-generate:hover { filter: brightness(1.08); }
+
+/* Keyboard shortcuts cheat-sheet overlay (toggled with `?`). */
+.shortcuts-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+.shortcuts-card {
+  width: min(880px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  padding: 18px 22px 22px;
+  background: var(--toolbar-bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+.shortcuts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font: 700 15px ui-sans-serif, system-ui, sans-serif;
+  color: var(--text);
+  margin-bottom: 14px;
+}
+.shortcuts-close {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  opacity: 0.6;
+  font-size: 16px;
+  cursor: pointer;
+}
+.shortcuts-close:hover { opacity: 1; }
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px 28px;
+}
+.shortcuts-section-title {
+  font: 700 11px ui-sans-serif, system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+.shortcuts-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 3px 0;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.shortcuts-row kbd {
+  flex-shrink: 0;
+  min-width: 92px;
+  font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--accent);
+  background: rgba(207, 123, 240, 0.1);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 6px;
+}
+.shortcuts-row span { opacity: 0.85; line-height: 1.4; }
+
+/* Pen toolbar — vertical left panel, mirrors the object-properties panel. */
+.pen-toolbar {
+  position: fixed;
+  left: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 320px;
+  padding: 12px;
+  background: var(--toolbar-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+}
+.pen-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pen-toolbar .color-palette { flex-wrap: nowrap; gap: 6px; justify-content: space-between; }
+
+/* Dark custom range sliders (track dark, accent thumb). */
+.pen-group input[type="range"],
+.props-group input[type="range"] {
+  width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: #15151f;
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.pen-group input[type="range"]::-webkit-slider-thumb,
+.props-group input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid #0a0a0f;
+  cursor: pointer;
+}
+.pen-group input[type="range"]::-moz-range-thumb,
+.props-group input[type="range"]::-moz-range-thumb {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid #0a0a0f;
+  cursor: pointer;
+}
+.pen-group input[type="range"]::-moz-range-track,
+.props-group input[type="range"]::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #15151f;
+}
+
+/* Functions cluster — vertical, pinned to the right edge, centered. */
+.toolbar.toolbar-functions {
+  left: auto;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  flex-direction: column;
+}
+.toolbar.toolbar-functions .toolbar-divider {
+  width: 24px;
+  height: 1px;
+}
+
+/* Object-properties panel — vertical, pinned to the left edge, centered. */
+.props-panel {
+  position: fixed;
+  left: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 320px;
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--toolbar-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+}
+.props-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text);
+  opacity: 0.6;
+}
+.props-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.props-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text);
+  opacity: 0.45;
+}
+.props-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.props-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 4px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  color: var(--text);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.props-btn:hover { background: rgba(255, 255, 255, 0.06); }
+.props-btn.active {
+  background: rgba(207, 123, 240, 0.2);
+  border-color: rgba(207, 123, 240, 0.5);
+  color: #cf7bf0;
+}
+.props-btn:disabled { opacity: 0.3; cursor: default; }
+/* Markdown formatting toolbar — rows of equal-width small buttons. */
+.props-row.props-format {
+  gap: 4px;
+}
+.props-row.props-format .props-btn.fmt {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 28px;
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.props-row.props-format.hl-row .props-btn.fmt.hl-swatch {
+  border: 1.5px solid rgba(0, 0, 0, 0.4);
+  border-radius: 50%;
+  height: 22px;
+  padding: 0;
+}
+.props-row.props-format.hl-row .props-btn.fmt.hl-swatch:hover {
+  transform: scale(1.15);
+  border-color: var(--text);
+}
+
+.props-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+.props-input:focus { border-color: #cf7bf0; }
+/* Palette fits on a single row inside the wide props panel. */
+.props-panel .color-palette { flex-wrap: nowrap; gap: 6px; justify-content: space-between; }
+/* Logic-kind chips inside the props panel: single-line labels. */
+.props-panel .logic-grid-row { display: flex; gap: 5px; }
+.props-panel .logic-grid-row > .logic-chip { flex: 1; min-width: 0; }
+.props-panel .logic-chip {
+  font: 600 10px/1.1 ui-sans-serif, system-ui, sans-serif;
+  padding: 6px 5px;
+  border-width: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.props-panel .logic-chip.full { width: 100%; }
+
+/* Figure shape submenu (pops below the Figure tool button). */
+.figure-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+  background: var(--toolbar-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 200;
+}
+
+.toolbar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  transition: background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+  position: relative;
+}
+
+/* Hotkey pill — tiny badge in the button's bottom-right corner showing the
+   key that triggers it. */
+.hk-pill {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  font: 600 8px/1 ui-sans-serif, system-ui, sans-serif;
+  padding: 1.5px 3px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.10);
+  color: rgba(224, 224, 232, 0.72);
+  pointer-events: none;
+  letter-spacing: 0.02em;
+}
+.toolbar-btn.tool-active .hk-pill {
+  background: rgba(0, 0, 0, 0.25);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* Chip variant — overlays the chip's bottom-right corner so the label text
+   stays centred and never shifts. */
+.logic-chip { position: relative; }
+.hk-pill.hk-chip {
+  right: 1px;
+  bottom: 1px;
+  padding: 1px 2.5px;
+  font-size: 7px;
+  background: rgba(255, 255, 255, 0.09);
+  color: rgba(224, 224, 232, 0.55);
+}
+
+/* Sub-group header inside a props-group (e.g. "Math logic" / "Reality"
+   under Type for arrows). */
+.props-sublabel {
+  display: block;
+  margin: 6px 0 2px;
+  font: 600 8.5px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(224, 224, 232, 0.45);
+}
+
+/* Colour-swatch variant — tiny digit in the swatch corner, kept legible on
+   any swatch colour by a dark backing. */
+.color-swatch { position: relative; }
+.hk-pill.hk-swatch {
+  right: 0;
+  bottom: 0;
+  padding: 1px 2.5px;
+  font-size: 7.5px;
+  border-radius: 3px 0 3px 0;
+  background: rgba(0, 0, 0, 0.45);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.toolbar-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.toolbar-btn:active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.toolbar-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+  pointer-events: none;
+}
+
+.toolbar-btn.toolbar-btn-small {
+  padding: 4px 6px;
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 24px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+/* ============================================================
+   Active tool button state (unified for select/draw/eraser)
+   ============================================================ */
+.toolbar-btn.tool-active {
+  background: rgba(207, 123, 240, 0.2);
+  color: #cf7bf0;
+  border: 1px solid rgba(207, 123, 240, 0.4);
+}
+
+/* ============================================================
+   Eraser options
+   ============================================================ */
+.eraser-options {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.eraser-mode-btn {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  border: none;
+  background: none;
+}
+
+.eraser-mode-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.eraser-mode-btn.active {
+  background: rgba(207, 123, 240, 0.2);
+  color: #cf7bf0;
+}
+
+.eraser-radius-slider {
+  width: 60px;
+  height: 4px;
+  accent-color: #cf7bf0;
+  cursor: pointer;
+}
+
+/* ============================================================
+   Color palette
+   ============================================================ */
+.color-palette {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+
+.color-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+  flex-shrink: 0;
+}
+
+.color-swatch:hover {
+  transform: scale(1.25);
+}
+
+.color-swatch.active {
+  border-color: #fff;
+  transform: scale(1.2);
+}
+
+.color-palette.disabled {
+  opacity: 0.4;
+}
+.color-palette.disabled .color-swatch {
+  cursor: not-allowed;
+}
+.color-palette.disabled .color-swatch:hover {
+  transform: none;
+}
+
+/* ============================================================
+   Logic panel — node / arrow kind chips
+   ============================================================ */
+.logic-panel {
+  position: absolute;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 12px 16px;
+  background: rgba(20, 22, 30, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  z-index: 50;
+  max-height: 84vh;
+  overflow-y: auto;
+}
+.logic-section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.logic-section:first-child { width: 220px; }
+.logic-section:last-child { width: 330px; }
+.logic-section-title {
+  font: 700 11px/1 ui-sans-serif, system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(180, 180, 195, 0.7);
+  margin-bottom: 2px;
+}
+.logic-grid-row {
+  display: flex;
+  gap: 5px;
+}
+.logic-grid-row > .logic-chip {
+  flex: 1;
+  min-width: 0;
+}
+.logic-chip.full { width: 100%; }
+.logic-chip {
+  font: 600 11px/1.15 ui-sans-serif, system-ui, sans-serif;
+  padding: 7px 8px;
+  background: transparent;
+  border: 1.5px solid rgba(255, 255, 255, 0.22);
+  color: rgba(220, 220, 230, 0.85);
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease;
+}
+.logic-chip:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+}
+.logic-chip:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.logic-chip.none {
+  color: rgba(180, 180, 195, 0.75);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.logic-chip.active {
+  font-weight: 700;
+}
+.logic-row-sep {
+  display: inline-block;
+  width: 1px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.12);
+  margin: 0 4px;
+}
+.logic-hint {
+  font: 12px/1.3 ui-sans-serif, system-ui, sans-serif;
+  color: rgba(180, 180, 195, 0.65);
+  padding-top: 2px;
+}
+
+/* ============================================================
+   Overview mode - zoom < 0.4: hide text, thicken strokes
+   ============================================================ */
+.canvas-root.overview .canvas-grid {
+  opacity: 0;
+}
+
+.canvas-root.overview .node-text {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.canvas-root.overview .anchor-dot {
+  display: none;
+}
+
+.canvas-root.overview .wb-node {
+  border-width: 3px;
+}
+
+.canvas-root.overview .arrow-path {
+  stroke-width: 4;
+}
+
+/* ============================================================
+   Freehand drawing layer (SVG strokes)
+   ============================================================ */
+.drawing-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.drawing-layer.active {
+  pointer-events: all;
+  cursor: crosshair;
+  z-index: 100;
+}
+
+.freehand-stroke:not(.gel) {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* Gel-pen strokes are filled outlines (fill set inline per stroke), not
+   stroked paths — don't force fill:none on them. */
+.freehand-stroke.gel {
+  stroke: none;
+}
+
+.freehand-stroke.in-selection {
+  filter: drop-shadow(0 0 3px rgba(207, 123, 240, 0.6));
+}
+
+/* Draw mode indicator */
+.canvas-root.draw-mode {
+  cursor: crosshair;
+}
+
+.canvas-root.draw-mode .node-layer,
+.canvas-root.draw-mode .region-layer {
+  pointer-events: none;
+}
+
+/* Move mode indicator */
+.canvas-root.move-mode {
+  cursor: grab;
+}
+.canvas-root.move-mode.panning {
+  cursor: grabbing;
+}
+/* Move tool = pure pan: nothing reacts (no node/region/arrow/stroke/anchor
+   interaction). Every click falls through to the background and pans. */
+.canvas-root.move-mode .node-layer,
+.canvas-root.move-mode .region-layer,
+.canvas-root.move-mode .arrow-layer,
+.canvas-root.move-mode .drawing-layer {
+  pointer-events: none;
+}
+/* Anchors set their own pointer-events:all, so override them explicitly —
+   otherwise you could still pull connections out of regions/nodes in move. */
+.canvas-root.move-mode .region-anchor-dot,
+.canvas-root.move-mode .anchor-dot,
+.canvas-root.move-mode .pill-anchor,
+.canvas-root.move-mode .region-border-hit {
+  pointer-events: none !important;
+}
+
+/* Arrow tool — crosshair; let drags start on empty canvas, not nodes. */
+.canvas-root.arrow-mode {
+  cursor: crosshair;
+}
+
+/* Placement tools (node / region / figure) — crosshair; click or drag a box.
+   Content is inert so a shape can be drawn over existing objects. */
+.canvas-root.place-mode {
+  cursor: crosshair;
+}
+.canvas-root.place-mode .node-layer,
+.canvas-root.place-mode .region-layer,
+.canvas-root.place-mode .arrow-layer,
+.canvas-root.place-mode .drawing-layer {
+  pointer-events: none;
+}
+.place-preview {
+  position: absolute;
+  border: 1.5px dashed var(--accent);
+  background: rgba(207, 123, 240, 0.08);
+  pointer-events: none;
+  z-index: 5;
+  box-sizing: border-box;
+}
+
+/* ============================================================
+   Eraser mode
+   ============================================================ */
+.canvas-root.eraser-mode {
+  cursor: none;
+}
+
+.eraser-hit-layer {
+  position: absolute;
+  top: -100000px;
+  left: -100000px;
+  width: 200000px;
+  height: 200000px;
+  z-index: 200;
+  pointer-events: all;
+  cursor: none;
+}
+
+.eraser-cursor-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 300;
+}
+
+.eraser-cursor {
+  fill: rgba(255, 255, 255, 0.05);
+  stroke: rgba(255, 255, 255, 0.5);
+  pointer-events: none;
+}
+
+/* ============================================================
+   Rectangle selection
+   ============================================================ */
+.select-hit-layer {
+  position: absolute;
+  top: -100000px;
+  left: -100000px;
+  width: 200000px;
+  height: 200000px;
+  z-index: 0;
+  pointer-events: all;
+  cursor: crosshair;
+}
+
+.select-rect-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 250;
+}
+
+.selection-rect {
+  fill: rgba(207, 123, 240, 0.08);
+  stroke: #cf7bf0;
+}
+
+/* ============================================================
+   Auth gate
+   ============================================================ */
+/* ============================================================
+   Board picker
+   ============================================================ */
+.board-picker-container {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  z-index: 102;
+}
+
+.board-picker-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: var(--toolbar-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+  transition: background 0.15s;
+}
+
+.board-picker-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.board-picker-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 180px;
+  background: var(--toolbar-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.board-picker-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s;
+  border: none;
+  background: none;
+}
+
+.board-picker-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.board-picker-item.active {
+  color: var(--accent);
+}
+
+.board-picker-check {
+  color: var(--accent);
+  font-size: 14px;
+}
+
+@media (max-width: 768px) {
+  .board-picker-container {
+    top: auto;
+    bottom: 60px;
+    left: 12px;
+  }
+  .board-picker-dropdown {
+    top: auto;
+    bottom: calc(100% + 6px);
+  }
+}
+
+.auth-gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: var(--text-muted, rgba(255,255,255,0.5));
+  font-size: 16px;
+  text-align: center;
+  padding: 24px;
+}
+
+/* ============================================================
+   Draw options panel (color + width picker)
+   ============================================================ */
+.draw-options {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 101;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--toolbar-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* Desktop: below toolbar */
+.draw-options {
+  bottom: auto;
+  top: 70px;
+}
+
+.color-swatch.small {
+  width: 14px;
+  height: 14px;
+}
+
+.width-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.15s;
+  color: var(--text);
+}
+
+.width-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.width-btn.active {
+  border-color: #cf7bf0;
+  background: rgba(207, 123, 240, 0.15);
+}
+
+/* ============================================================
+   Stroke selection bounding box
+   ============================================================ */
+.stroke-selection-rect {
+  pointer-events: none;
+}
+
+/* ============================================================
+   MOBILE — toolbar at bottom, compact buttons
+   ============================================================ */
+@media (max-width: 768px) {
+  .toolbar {
+    top: auto;
+    bottom: 12px;
+    padding: 6px 10px;
+    gap: 4px;
+    max-width: calc(100vw - 24px);
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Hide text labels, keep icons only */
+  .toolbar-btn span,
+  .toolbar-btn:not(:empty) {
+    font-size: 0;
+  }
+  .toolbar-btn svg {
+    font-size: initial;
+  }
+  .toolbar-btn {
+    padding: 8px;
+    min-width: 36px;
+    min-height: 36px;
+    font-size: 0;
+  }
+
+  .color-swatch {
+    width: 14px;
+    height: 14px;
+  }
+
+  .color-palette {
+    gap: 3px;
+  }
+
+  .eraser-mode-btn {
+    padding: 4px 6px;
+    font-size: 11px;
+  }
+
+  /* Mobile: draw options above bottom toolbar */
+  .draw-options {
+    top: auto;
+    bottom: 70px;
+  }
+
+  .eraser-radius-slider {
+    width: 40px;
+  }
+
+  .toolbar-divider {
+    height: 20px;
+  }
+}
