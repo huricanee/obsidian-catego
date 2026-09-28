@@ -25,6 +25,27 @@ const pinDeps = {
   },
 };
 
+// jsPDF's "pdfobjectnewwindow" output mode injects a <script> that loads
+// pdfobject from a CDN. Catego never uses that mode (it only saves PDFs), and a
+// plugin must not be able to load remote code — so cut that branch out of the
+// bundle. Fails the build if jsPDF changes shape, instead of silently shipping it.
+const stripRemoteScripts = {
+  name: 'strip-remote-scripts',
+  setup(build) {
+    build.onLoad({ filter: /[\\/]jspdf[\\/]dist[\\/]jspdf\.es\.min\.js$/ }, (args) => {
+      const src = fs.readFileSync(args.path, 'utf8');
+      const start = src.indexOf('case"pdfobjectnewwindow":');
+      const end = src.indexOf('case"pdfjsnewwindow":', start);
+      if (start < 0 || end < 0) throw new Error('strip-remote-scripts: jsPDF pdfobjectnewwindow branch not found — re-check before shipping');
+      const out = src.slice(0, start)
+        + 'case"pdfobjectnewwindow":throw new Error("jsPDF output \'pdfobjectnewwindow\' is disabled in Catego (it loads a remote script).");'
+        + src.slice(end);
+      if (/createElement\(["']script["']\)/.test(out)) throw new Error('strip-remote-scripts: jsPDF still creates <script> elements');
+      return { contents: out, loader: 'js' };
+    });
+  },
+};
+
 // canvas.css ships as the plugin's styles.css.
 function generateStyles() {
   const canvasCss = fs.readFileSync('src/shared/canvas.css', 'utf8');
@@ -85,7 +106,7 @@ const ctx = await esbuild.context({
   target: 'es2020',
   platform: 'browser',
   jsx: 'automatic',
-  plugins: [pinDeps],
+  plugins: [pinDeps, stripRemoteScripts],
   loader: {
     '.css': 'empty',   // CSS imported from JS (canvas.css, katex.css) ships via styles.css instead
     '.png': 'dataurl',

@@ -1334,6 +1334,12 @@ export default function Canvas({
 
     if (!isBackground) return;
 
+    // Clicking the empty canvas ends a node text edit. The handlers below
+    // preventDefault (which would keep focus — and the uncommitted text — in
+    // the node), so blur explicitly: onTextBlur saves the text.
+    const ae = document.activeElement;
+    if (ae && ae.isContentEditable && ae.classList.contains('node-text')) ae.blur();
+
     const rect = rootRef.current.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;

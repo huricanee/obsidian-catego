@@ -1,3 +1,2 @@
-- Board preferences (settings panel open, theme, LaTeX source mode) are stored in the plugin's own data instead of browser localStorage.
-- Release assets now carry GitHub artifact attestations (built from the lockfile by GitHub Actions).
-- Fix: the view no longer shadows Obsidian's `TextFileView.onRename`.
+- No runtime `<script>` creation in the bundle (fixes the directory review's code-obfuscation error): React is pinned to 18.3.1, and jsPDF's unused "pdfobjectnewwindow" mode — which loaded a script from a CDN — is stripped at build time.
+- Fix: clicking the empty canvas while editing a node now saves the text.
