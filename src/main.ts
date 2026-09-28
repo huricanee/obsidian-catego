@@ -5,9 +5,28 @@ import { CategoView, VIEW_TYPE_CATEGO } from './view';
  * One `.catego` file = one board. No accounts, no registration, no board list —
  * boards are just files in your vault (like Excalidraw drawings).
  */
+export interface Prefs {
+  get(key: string): string | null;
+  set(key: string, value: string): void;
+}
+
 export default class CategoPlugin extends Plugin {
+  /** Per-user board UI preferences (panel open, theme, …), kept in the plugin's data.json. */
+  private prefValues: Record<string, string> = {};
+  prefs: Prefs = {
+    get: (k) => (k in this.prefValues ? this.prefValues[k] : null),
+    set: (k, v) => {
+      if (this.prefValues[k] === v) return;
+      this.prefValues[k] = v;
+      this.saveData({ prefs: this.prefValues });
+    },
+  };
+
   async onload() {
-    this.registerView(VIEW_TYPE_CATEGO, (leaf) => new CategoView(leaf));
+    const data = await this.loadData();
+    if (data && data.prefs && typeof data.prefs === 'object') this.prefValues = { ...data.prefs };
+
+    this.registerView(VIEW_TYPE_CATEGO, (leaf) => new CategoView(leaf, this.prefs));
     try {
       this.registerExtensions(['catego'], VIEW_TYPE_CATEGO);
     } catch (e) {

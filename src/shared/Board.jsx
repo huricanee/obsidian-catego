@@ -150,6 +150,13 @@ function applySnapshot(state, snapshot) {
   };
 }
 
+// Default per-viewer preferences: kept in memory only. Hosts pass a
+// persistent store (the web app: browser storage; Obsidian: plugin data).
+function makeMemoryPrefs() {
+  const m = new Map();
+  return { get: (k) => (m.has(k) ? m.get(k) : null), set: (k, v) => { m.set(k, v); } };
+}
+
 // Default sync: none. Hosts with a server pass their own hook (same signature).
 function useNoSync() {
   const send = useCallback(() => {}, []);
@@ -172,16 +179,19 @@ function useNoSync() {
    overlay            host UI rendered on top of the board (board picker, login, …)
    renderRegionExtras (regionId) → extra rows in the region properties panel
    isolateKeys        stop board keystrokes from reaching the host app (Obsidian)
+   prefs              { get(key) → string|null, set(key, string) } — per-viewer UI
+                      preferences (panel open, theme, LaTeX source mode)
    defaultZoom        zoom of a fresh board and of "reset zoom" (0 / fit on empty board)
    onOpenNote / onRenameNoteFile / bridge — note-backed nodes (Obsidian)
    ================================================================ */
 export default function Board({
   initial = null, onPersist, useSyncHook = useNoSync, overlay = null,
-  renderRegionExtras = null, isolateKeys = false, defaultZoom = 1,
+  renderRegionExtras = null, isolateKeys = false, defaultZoom = 1, prefs: prefsProp = null,
   onOpenNote, onRenameNoteFile, bridge,
 }) {
   const isMobile = useMobile();
   const rootRef = useRef(null);
+  const [prefs] = useState(() => prefsProp || makeMemoryPrefs());
   // nodeId -> vault path for note-backed nodes.
   const [notes, setNotes] = useState(() => (initial && initial.notes) || {});
 
@@ -235,17 +245,17 @@ export default function Board({
   const [showArrowHandles, setShowArrowHandles] = useState(false);
 
   // LaTeX source mode toggle (show raw LaTeX in all nodes)
-  const [sourceMode, setSourceMode] = useState(() => localStorage.getItem('catego-source-mode') === 'true');
+  const [sourceMode, setSourceMode] = useState(() => prefs.get('catego-source-mode') === 'true');
 
   // Light theme — implemented as a global CSS `filter: invert(1) hue-rotate(180deg)`
   // on the document body, applied via a class. Hue-rotate keeps colors looking
   // roughly correct (red stays red, blue stays blue). A second filter on <img>
   // and <video> cancels the outer inversion so photos/logos render normally.
-  const [lightTheme, setLightTheme] = useState(() => localStorage.getItem('catego-light-theme') === 'true');
+  const [lightTheme, setLightTheme] = useState(() => prefs.get('catego-light-theme') === 'true');
   useEffect(() => {
     document.body.classList.toggle('light-theme', lightTheme);
-    localStorage.setItem('catego-light-theme', String(lightTheme));
-  }, [lightTheme]);
+    prefs.set('catego-light-theme', String(lightTheme));
+  }, [lightTheme, prefs]);
   const toggleLightTheme = useCallback(() => setLightTheme((v) => !v), []);
 
   // Print menu — pops out JPEG / PDF export options below the Print button.
@@ -263,11 +273,11 @@ export default function Board({
   const [dslOpen, setDslOpen] = useState(false);
   // Properties panel — opens only via the ` hotkey, not on selection.
   const [propsOpen, setPropsOpen] = useState(() => {
-    try { return localStorage.getItem('catego-props-open') !== 'false'; } catch { return true; }
+    return prefs.get('catego-props-open') !== 'false';
   });
   useEffect(() => {
-    try { localStorage.setItem('catego-props-open', String(propsOpen)); } catch { /* storage unavailable */ }
-  }, [propsOpen]);
+    prefs.set('catego-props-open', String(propsOpen));
+  }, [propsOpen, prefs]);
 
   // Placement tools: toolMode 'node' | 'region' | 'figure' — click or drag on
   // the canvas to create the object (Excalidraw-style). For 'figure', the
@@ -343,10 +353,10 @@ export default function Board({
   const toggleSourceMode = useCallback(() => {
     setSourceMode(prev => {
       const next = !prev;
-      localStorage.setItem('catego-source-mode', String(next));
+      prefs.set('catego-source-mode', String(next));
       return next;
     });
-  }, []);
+  }, [prefs]);
 
   // Draw options panel (double-tap draw button)
   const [showDrawOptions, setShowDrawOptions] = useState(false);
@@ -468,7 +478,7 @@ export default function Board({
   });
 
   /* ================================================================
-     Persistence — debounced save to the host (file / localStorage)
+     Persistence — debounced save to the host (file / browser storage)
      ================================================================ */
   const saveTimer = useRef(null);
   const firstSave = useRef(true);

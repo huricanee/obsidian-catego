@@ -1,0 +1,3 @@
+- Board preferences (settings panel open, theme, LaTeX source mode) are stored in the plugin's own data instead of browser localStorage.
+- Release assets now carry GitHub artifact attestations (built from the lockfile by GitHub Actions).
+- Fix: the view no longer shadows Obsidian's `TextFileView.onRename`.

@@ -22,7 +22,7 @@ export class CategoView extends TextFileView {
   private reload = 0;
   private bridge: Bridge = {};
 
-  constructor(leaf: WorkspaceLeaf) { super(leaf); }
+  constructor(leaf: WorkspaceLeaf, private prefs: { get(k: string): string | null; set(k: string, v: string): void }) { super(leaf); }
 
   getViewType() { return VIEW_TYPE_CATEGO; }
   getDisplayText() { return this.file?.basename ?? 'Catego'; }
@@ -46,7 +46,7 @@ export class CategoView extends TextFileView {
     });
     this.registerDomEvent(this.contentEl, 'drop', (e) => this.onDrop(e));
     // Keep note-node titles/links in sync when a note is renamed/moved.
-    this.registerEvent(this.app.vault.on('rename', (f, oldPath) => this.onRename(f, oldPath)));
+    this.registerEvent(this.app.vault.on('rename', (f, oldPath) => this.onVaultRename(f, oldPath)));
     this.renderBoard();
   }
 
@@ -65,6 +65,7 @@ export class CategoView extends TextFileView {
         onRenameNoteFile: (oldPath: string, newTitle: string) => this.renameNoteFile(oldPath, newTitle),
         bridge: this.bridge,
         isolateKeys: true,
+        prefs: this.prefs,
       }),
     );
   }
@@ -115,7 +116,7 @@ export class CategoView extends TextFileView {
     else new Notice('Open the Catego board first, then add the note.');
   }
 
-  private onRename(file: any, oldPath: string) {
+  private onVaultRename(file: any, oldPath: string) {
     if (!(file instanceof TFile)) return;
     if (this.bridge.renameNote) this.bridge.renameNote(oldPath, file.path, file.basename);
   }
