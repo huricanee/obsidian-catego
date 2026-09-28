@@ -54,6 +54,7 @@ function generateStyles() {
   max-height: 88%; z-index: 110;
 }
 .catego-root .color-swatch { width: 18px; height: 18px; min-width: 0; padding: 0; flex: 0 0 auto; box-shadow: none; }
+.catego-root .toolbar-btn.props-toggle { position: absolute; top: 44px; left: 12px; }
 .catego-root .mode-badge { position: absolute; top: 44px; right: 14px; bottom: auto; }
 `;
   // KaTeX stylesheet with its woff2 fonts inlined as data URIs, so LaTeX renders

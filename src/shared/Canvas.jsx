@@ -49,6 +49,26 @@ export function getRegionAnchorPos(region, anchor) {
 // so the handle survives node/region movement: when an endpoint moves, the
 // control point moves with it, preserving the curve shape. When absent, the
 // control point falls back to the auto tension heuristic keyed off the anchor.
+// An anchor is a node side name ('top' | 'right' | 'bottom' | 'left') or, for a
+// pill side (pills may be rotated with the curve), an outward normal { nx, ny }.
+function anchorNormal(anchor) {
+  if (anchor && typeof anchor === 'object') return anchor;
+  switch (anchor) {
+    case 'right':  return { nx: 1, ny: 0 };
+    case 'left':   return { nx: -1, ny: 0 };
+    case 'top':    return { nx: 0, ny: -1 };
+    case 'bottom': return { nx: 0, ny: 1 };
+    default:       return null;
+  }
+}
+// Nearest cardinal side name for an anchor (for axis-aligned routing).
+function anchorName(anchor) {
+  if (!anchor || typeof anchor !== 'object') return anchor;
+  return Math.abs(anchor.nx) >= Math.abs(anchor.ny)
+    ? (anchor.nx > 0 ? 'right' : 'left')
+    : (anchor.ny > 0 ? 'bottom' : 'top');
+}
+
 export function bezierPath(sx, sy, fromAnchor, ex, ey, toAnchor, fromCtrl, toCtrl) {
   const dist = Math.sqrt((ex - sx) ** 2 + (ey - sy) ** 2);
   const tension = Math.max(dist * 0.4, 40);
@@ -57,26 +77,16 @@ export function bezierPath(sx, sy, fromAnchor, ex, ey, toAnchor, fromCtrl, toCtr
   if (fromCtrl) {
     cp1x = sx + fromCtrl.dx; cp1y = sy + fromCtrl.dy;
   } else {
-    cp1x = sx; cp1y = sy;
-    switch (fromAnchor) {
-      case 'right':  cp1x = sx + tension; break;
-      case 'left':   cp1x = sx - tension; break;
-      case 'top':    cp1y = sy - tension; break;
-      case 'bottom': cp1y = sy + tension; break;
-    }
+    const n = anchorNormal(fromAnchor);
+    cp1x = sx + (n ? n.nx * tension : 0); cp1y = sy + (n ? n.ny * tension : 0);
   }
 
   let cp2x, cp2y;
   if (toCtrl) {
     cp2x = ex + toCtrl.dx; cp2y = ey + toCtrl.dy;
   } else {
-    cp2x = ex; cp2y = ey;
-    switch (toAnchor) {
-      case 'right':  cp2x = ex + tension; break;
-      case 'left':   cp2x = ex - tension; break;
-      case 'top':    cp2y = ey - tension; break;
-      case 'bottom': cp2y = ey + tension; break;
-    }
+    const n = anchorNormal(toAnchor);
+    cp2x = ex + (n ? n.nx * tension : 0); cp2y = ey + (n ? n.ny * tension : 0);
   }
 
   // Midpoint of cubic bezier at t=0.5
@@ -109,7 +119,8 @@ export function straightPath(sx, sy, ex, ey) {
    rounded corners. Routes the line along the cardinal axes, exiting
    each endpoint in the direction of its anchor.
    ================================================================ */
-function elbowPoints(sx, sy, fromAnchor, ex, ey, toAnchor) {
+function elbowPoints(sx, sy, fromAnchorIn, ex, ey, toAnchorIn) {
+  const fromAnchor = anchorName(fromAnchorIn), toAnchor = anchorName(toAnchorIn);
   const fh = fromAnchor === 'left' || fromAnchor === 'right';
   const th = toAnchor === 'left' || toAnchor === 'right';
   if (fh && th) {
@@ -245,7 +256,7 @@ export function getPillBounds(arrow, edgeKinds) {
 
    Returns { x, y } or null if any reference is missing / cyclic.
    ================================================================ */
-export function resolveEndpoint(arrow, end, nodes, arrows, heights, edgeKinds, regions = {}, depth = 0) {
+export function resolveEndpoint(arrow, end, nodes, arrows, heights, edgeKinds, regions = {}, depth = 0, centerOnly = false) {
   if (depth > 8) return null; // guard against cycles
   const pillId   = end === 'from' ? arrow.fromPillArrowId : arrow.toPillArrowId;
   const nodeId   = end === 'from' ? arrow.fromNodeId      : arrow.toNodeId;
@@ -253,32 +264,48 @@ export function resolveEndpoint(arrow, end, nodes, arrows, heights, edgeKinds, r
   const point    = end === 'from' ? arrow.fromPoint       : arrow.toPoint;
   const anchor   = end === 'from' ? arrow.fromAnchor      : arrow.toAnchor;
   // Free-floating endpoint (arrow drawn "from empty to empty"): fixed world point.
-  if (point) return { x: point.x, y: point.y };
+  if (point) return { x: point.x, y: point.y, anchor };
   if (pillId) {
     const host = arrows[pillId];
     if (!host) return null;
     const hf = resolveEndpoint(host, 'from', nodes, arrows, heights, edgeKinds, regions, depth + 1);
     const ht = resolveEndpoint(host, 'to',   nodes, arrows, heights, edgeKinds, regions, depth + 1);
     if (!hf || !ht) return null;
-    const { midX, midY } = bezierPath(hf.x, hf.y, host.fromAnchor, ht.x, ht.y, host.toAnchor, host.fromCtrl, host.toCtrl);
+    const { midX, midY, cp1x, cp1y, cp2x, cp2y } = bezierPath(hf.x, hf.y, hf.anchor, ht.x, ht.y, ht.anchor, host.fromCtrl, host.toCtrl);
     const b = getPillBounds(host, edgeKinds);
-    if (!b) return { x: midX, y: midY };
-    switch (anchor) {
-      case 'top':    return { x: midX,           y: midY - b.halfH };
-      case 'right':  return { x: midX + b.halfW, y: midY };
-      case 'bottom': return { x: midX,           y: midY + b.halfH };
-      case 'left':   return { x: midX - b.halfW, y: midY };
-      default:       return { x: midX,           y: midY };
+    if (!b || centerOnly) return { x: midX, y: midY, anchor: null };
+    // The pill is drawn rotated along its curve for rotateWithFlow kinds.
+    const hk = host.kind ? edgeKinds[host.kind] : null;
+    const ang = hk && hk.rotateWithFlow ? Math.atan2(cp2y - cp1y, cp2x - cp1x) : 0;
+    const cos = Math.cos(ang), sin = Math.sin(ang);
+    // Enter/leave through the side that faces the arrow's other end — never
+    // the centre. (A pill-to-pill arrow aims at the other pill's centre.)
+    const other = resolveEndpoint(arrow, end === 'from' ? 'to' : 'from', nodes, arrows, heights, edgeKinds, regions, depth + 1, true);
+    let lx, ly; // chosen side in the pill's local frame (unit direction)
+    if (other) {
+      const dx = other.x - midX, dy = other.y - midY;
+      const ox = dx * cos + dy * sin, oy = -dx * sin + dy * cos;
+      if (Math.abs(ox) * b.halfH >= Math.abs(oy) * b.halfW) { lx = ox >= 0 ? 1 : -1; ly = 0; }
+      else { lx = 0; ly = oy >= 0 ? 1 : -1; }
+    } else {
+      const n = anchorNormal(anchor) || { nx: 1, ny: 0 };
+      lx = n.nx; ly = n.ny;
     }
+    const px = lx * b.halfW, py = ly * b.halfH;
+    return {
+      x: midX + px * cos - py * sin,
+      y: midY + px * sin + py * cos,
+      anchor: { nx: lx * cos - ly * sin, ny: lx * sin + ly * cos },
+    };
   }
   if (regionId) {
     const r = regions[regionId];
     if (!r) return null;
-    return getRegionAnchorPos(r, anchor);
+    return { ...getRegionAnchorPos(r, anchor), anchor };
   }
   const n = nodes[nodeId];
   if (!n) return null;
-  return getAnchorPos(n, anchor, heights);
+  return { ...getAnchorPos(n, anchor, heights), anchor };
 }
 
 /* ================================================================
@@ -1930,36 +1957,17 @@ export default function Canvas({
           const draggedId = ds.nodeId;
           const draggedSnap = { ...allNodes[draggedId], x: newX, y: newY };
           const ahSize = vp.zoom < 0.4 ? 16 : 10;
-          const midCache = new Map(); // arrowId -> { midX, midY }
-          const resolvePos = (arrow, end) => {
-            const pillId = end === 'from' ? arrow.fromPillArrowId : arrow.toPillArrowId;
-            if (pillId) {
-              const cached = midCache.get(pillId);
-              if (cached) return { x: cached.midX, y: cached.midY };
-              // Pill host wasn't in the affected set — fall back to current
-              // (un-updated) midpoint via resolveEndpoint.
-              const host = arrowsRef.current[pillId];
-              if (!host) return null;
-              const hf = resolveEndpoint(host, 'from', allNodes, arrowsRef.current, heights, EDGE_KINDS, regionsRef.current);
-              const ht = resolveEndpoint(host, 'to',   allNodes, arrowsRef.current, heights, EDGE_KINDS, regionsRef.current);
-              if (!hf || !ht) return null;
-              const { midX, midY } = bezierPath(hf.x, hf.y, host.fromAnchor, ht.x, ht.y, host.toAnchor, host.fromCtrl, host.toCtrl);
-              return { x: midX, y: midY };
-            }
-            const nid = end === 'from' ? arrow.fromNodeId : arrow.toNodeId;
-            const an  = end === 'from' ? arrow.fromAnchor : arrow.toAnchor;
-            const n = nid === draggedId ? draggedSnap : allNodes[nid];
-            if (!n) return null;
-            return getAnchorPos(n, an, heights);
-          };
+          // Same geometry as render (pill sides, rotation), with the dragged
+          // node at its live position.
+          const liveNodes = { ...allNodes, [draggedId]: draggedSnap };
+          const resolvePos = (arrow, end) => resolveEndpoint(arrow, end, liveNodes, arrowsRef.current, heights, EDGE_KINDS, regionsRef.current);
           for (const aId of ds.affectedArrows) {
             const a = arrowsRef.current[aId];
             if (!a) continue;
             const from = resolvePos(a, 'from');
             const to   = resolvePos(a, 'to');
             if (!from || !to) continue;
-            const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } = bezierPath(from.x, from.y, a.fromAnchor, to.x, to.y, a.toAnchor, a.fromCtrl, a.toCtrl);
-            midCache.set(aId, { midX, midY });
+            const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } = bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, a.fromCtrl, a.toCtrl);
             const g = arrowGsRef.current[aId];
             if (!g) continue;
             // Both <path> children (hit + visible) get the same `d`
@@ -2009,7 +2017,7 @@ export default function Canvas({
             const fromCtrl = ds.end === 'from' ? ctrl : a.fromCtrl;
             const toCtrl   = ds.end === 'to'   ? ctrl : a.toCtrl;
             const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } =
-              bezierPath(from.x, from.y, a.fromAnchor, to.x, to.y, a.toAnchor, fromCtrl, toCtrl);
+              bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, fromCtrl, toCtrl);
             const ahSize = vp.zoom < 0.4 ? 16 : 10;
             // Redraw the arrow's own <g> (paths, arrowheads, midpoint marker).
             const g = arrowGsRef.current[ds.arrowId];
@@ -2064,7 +2072,7 @@ export default function Canvas({
           const f = resolveEndpoint(a, 'from', currentNodes, currentArrows, hm, EDGE_KINDS, regionsRef.current);
           const t = resolveEndpoint(a, 'to',   currentNodes, currentArrows, hm, EDGE_KINDS, regionsRef.current);
           if (!f || !t) continue;
-          const { midX, midY } = bezierPath(f.x, f.y, a.fromAnchor, t.x, t.y, a.toAnchor, a.fromCtrl, a.toCtrl);
+          const { midX, midY } = bezierPath(f.x, f.y, f.anchor, t.x, t.y, t.anchor, a.fromCtrl, a.toCtrl);
           const b = getPillBounds(a, EDGE_KINDS);
           if (!b) continue;
           // Find closest of the 4 cardinal anchors on the pill border.
@@ -2367,7 +2375,7 @@ export default function Canvas({
                   const f = resolveEndpoint(a, 'from', nodesRef.current, arrowsRef.current, nodeHeightRef.current, EDGE_KINDS, regionsRef.current);
                   const t = resolveEndpoint(a, 'to',   nodesRef.current, arrowsRef.current, nodeHeightRef.current, EDGE_KINDS, regionsRef.current);
                   if (!f || !t) return null;
-                  const { midX, midY } = bezierPath(f.x, f.y, a.fromAnchor, t.x, t.y, a.toAnchor, a.fromCtrl, a.toCtrl);
+                  const { midX, midY } = bezierPath(f.x, f.y, f.anchor, t.x, t.y, t.anchor, a.fromCtrl, a.toCtrl);
                   return { x: midX, y: midY };
                 })()
               : prev.fromRegionId
@@ -2677,34 +2685,15 @@ export default function Canvas({
     if (st.affectedArrows.length === 0) return;
     const draggedSnap = { ...allNodes[nodeId], x: newX, y: newY };
     const ahSize = vpRef.current.zoom < 0.4 ? 16 : 10;
-    const midCache = new Map();
-    const resolvePos = (arrow, end) => {
-      const pillId = end === 'from' ? arrow.fromPillArrowId : arrow.toPillArrowId;
-      if (pillId) {
-        const cached = midCache.get(pillId);
-        if (cached) return { x: cached.midX, y: cached.midY };
-        const host = allArrows[pillId];
-        if (!host) return null;
-        const hf = resolveEndpoint(host, 'from', allNodes, allArrows, heights, EDGE_KINDS, regionsRef.current);
-        const ht = resolveEndpoint(host, 'to',   allNodes, allArrows, heights, EDGE_KINDS, regionsRef.current);
-        if (!hf || !ht) return null;
-        const { midX, midY } = bezierPath(hf.x, hf.y, host.fromAnchor, ht.x, ht.y, host.toAnchor, host.fromCtrl, host.toCtrl);
-        return { x: midX, y: midY };
-      }
-      const nid = end === 'from' ? arrow.fromNodeId : arrow.toNodeId;
-      const an  = end === 'from' ? arrow.fromAnchor : arrow.toAnchor;
-      const n = nid === nodeId ? draggedSnap : allNodes[nid];
-      if (!n) return null;
-      return getAnchorPos(n, an, heights);
-    };
+    const liveNodes = { ...allNodes, [nodeId]: draggedSnap };
+    const resolvePos = (arrow, end) => resolveEndpoint(arrow, end, liveNodes, allArrows, heights, EDGE_KINDS, regionsRef.current);
     for (const aId of st.affectedArrows) {
       const a = allArrows[aId];
       if (!a) continue;
       const from = resolvePos(a, 'from');
       const to   = resolvePos(a, 'to');
       if (!from || !to) continue;
-      const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } = bezierPath(from.x, from.y, a.fromAnchor, to.x, to.y, a.toAnchor, a.fromCtrl, a.toCtrl);
-      midCache.set(aId, { midX, midY });
+      const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } = bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, a.fromCtrl, a.toCtrl);
       const g = arrowGsRef.current[aId];
       if (!g) continue;
       const paths = g.querySelectorAll(':scope > path');
@@ -2899,8 +2888,8 @@ export default function Canvas({
     // Geometry: bezier curve (default) or an orthogonal "elbow" connector.
     const isElbow = arrow.line === 'elbow' || arrow.line === 'straight';
     const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } = isElbow
-      ? elbowPath(from.x, from.y, arrow.fromAnchor, to.x, to.y, arrow.toAnchor)
-      : bezierPath(from.x, from.y, arrow.fromAnchor, to.x, to.y, arrow.toAnchor, arrow.fromCtrl, arrow.toCtrl);
+      ? elbowPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor)
+      : bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, arrow.fromCtrl, arrow.toCtrl);
     // Kind dictates color when set; otherwise fall back to user color.
     const color = kindDef ? kindDef.stroke : (arrow.color || '#ffffff');
     const isSelected = selectedType === 'arrow' && selectedId === aId;
@@ -3016,7 +3005,10 @@ export default function Canvas({
               rx={pillH / 2} ry={pillH / 2}
               fill="#0e0e10" stroke={color} strokeWidth={2}
             />
-            {arrow.kind === 'xor' ? (
+            {kindDef.icon ? (
+              <path d={kindDef.icon} fill="none" stroke={color} strokeWidth={1.8}
+                strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
+            ) : arrow.kind === 'xor' ? (
               /* XOR — a circle quartered by a full-diameter cross. */
               <g pointerEvents="none">
                 <circle r={9} fill="none" stroke={color} strokeWidth={2} />
@@ -3272,7 +3264,7 @@ export default function Canvas({
     const from = resolveEndpoint(arrow, 'from', nodes, arrows, nodeHeightMap, EDGE_KINDS, regions);
     const to   = resolveEndpoint(arrow, 'to',   nodes, arrows, nodeHeightMap, EDGE_KINDS, regions);
     if (from && to) {
-      const { cp1x, cp1y, cp2x, cp2y } = bezierPath(from.x, from.y, arrow.fromAnchor, to.x, to.y, arrow.toAnchor, arrow.fromCtrl, arrow.toCtrl);
+      const { cp1x, cp1y, cp2x, cp2y } = bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, arrow.fromCtrl, arrow.toCtrl);
       // Keep handles a constant screen size regardless of zoom.
       const r = 7 / zoom;
       const sw = 1.5 / zoom;
@@ -3308,7 +3300,7 @@ export default function Canvas({
         const hf = resolveEndpoint(host, 'from', nodes, arrows, nodeHeightMap, EDGE_KINDS, regions);
         const ht = resolveEndpoint(host, "to",   nodes, arrows, nodeHeightMap, EDGE_KINDS, regions);
         if (hf && ht) {
-          const { midX, midY } = bezierPath(hf.x, hf.y, host.fromAnchor, ht.x, ht.y, host.toAnchor, host.fromCtrl, host.toCtrl);
+          const { midX, midY } = bezierPath(hf.x, hf.y, hf.anchor, ht.x, ht.y, ht.anchor, host.fromCtrl, host.toCtrl);
           const b = getPillBounds(host, EDGE_KINDS);
           const an = arrowPreview.fromAnchor;
           if (b && an === 'top')         from = { x: midX,           y: midY - b.halfH };
@@ -3337,7 +3329,7 @@ export default function Canvas({
           const hf = resolveEndpoint(host, 'from', nodes, arrows, nodeHeightMap, EDGE_KINDS, regions);
           const ht = resolveEndpoint(host, "to",   nodes, arrows, nodeHeightMap, EDGE_KINDS, regions);
           if (hf && ht) {
-            const { midX, midY } = bezierPath(hf.x, hf.y, host.fromAnchor, ht.x, ht.y, host.toAnchor, host.fromCtrl, host.toCtrl);
+            const { midX, midY } = bezierPath(hf.x, hf.y, hf.anchor, ht.x, ht.y, ht.anchor, host.fromCtrl, host.toCtrl);
             const b = getPillBounds(host, EDGE_KINDS);
             const an = arrowPreview.snapPillAnchor;
             if (b && an === 'top')         { ex = midX;          ey = midY - b.halfH; }
@@ -3429,7 +3421,7 @@ export default function Canvas({
         const hf = resolveEndpoint(host, 'from', nodes, arrows, nodeHeightMap, EDGE_KINDS, regions);
         const ht = resolveEndpoint(host, 'to',   nodes, arrows, nodeHeightMap, EDGE_KINDS, regions);
         if (hf && ht) {
-          const { midX, midY } = bezierPath(hf.x, hf.y, host.fromAnchor, ht.x, ht.y, host.toAnchor, host.fromCtrl, host.toCtrl);
+          const { midX, midY } = bezierPath(hf.x, hf.y, hf.anchor, ht.x, ht.y, ht.anchor, host.fromCtrl, host.toCtrl);
           const b = getPillBounds(host, EDGE_KINDS);
           if (b) {
             let ax = midX, ay = midY;
@@ -3709,7 +3701,7 @@ export default function Canvas({
             const isRegionSelected = (selectedType === 'region' && selectedId === region.id) || (selection.regionIds && selection.regionIds.has(region.id));
             const color = region.color || '#cf7bf0';
             return (
-              <div key={region.id} className={`wb-region${isRegionSelected ? ' selected' : ''}${region.locked ? ' locked' : ''}`}
+              <div key={region.id} className={`wb-region${isRegionSelected ? ' selected' : ''}${region.locked ? ' locked' : ''}${region.noFill ? ' no-fill' : ''}`}
                 style={{ left: region.x, top: region.y, width: region.w, height: region.h, '--region-color': color,
                   // In select mode the body is grabbable (move) — unless locked,
                   // in which case the interior passes clicks through so you can

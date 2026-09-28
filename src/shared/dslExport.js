@@ -45,6 +45,7 @@ function regionLine(r) {
   const args = [Math.round(r.x), Math.round(r.y), Math.round(r.x + r.w), Math.round(r.y + r.h)];
   if (r.color && r.color !== DEFAULT_COLOR) args.push(r.color);
   if (r.locked) args.push('locked');
+  if (r.noFill) args.push('nofill');
   if (r.label && r.label.trim()) args.push(q(r.label));
   return `${r.id} = region(${args.join(', ')})`;
 }

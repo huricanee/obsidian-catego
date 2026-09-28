@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import Canvas from './shared/Canvas.jsx';
-import { NODE_KINDS, NODE_KIND_ORDER, EDGE_KINDS, EDGE_KIND_ORDER, NODE_STATUSES, NODE_STATUS_ROWS, FONT_FAMILY_ORDER, FONT_FAMILY_LABEL, DEFAULT_FONT_SIZE } from './shared/argTypes.js';
+import Canvas from './Canvas.jsx';
+import { NODE_KINDS, NODE_KIND_ORDER, EDGE_KINDS, EDGE_KIND_ORDER, NODE_STATUSES, NODE_STATUS_ROWS, FONT_FAMILY_ORDER, FONT_FAMILY_LABEL, DEFAULT_FONT_SIZE } from './argTypes.js';
 
 // Arrow kinds that fold n-ary participants instead of nesting another pill.
 const MERGEABLE_KINDS = new Set(['and', 'or', 'identical']);
@@ -56,8 +56,8 @@ const COLOR_HK = {
   '#f783ac': '9', '#ffffff': '0',
 };
 import { jsPDF } from 'jspdf';
-import { buildExportSvg, svgToCanvas } from './shared/exportSvg.js';
-import { buildGraphFromDsl } from './shared/dslImport.js';
+import { buildExportSvg, svgToCanvas } from './exportSvg.js';
+import { buildGraphFromDsl } from './dslImport.js';
 
 /* ================================================================
    Mobile detection hook
@@ -115,7 +115,7 @@ function insertListItemAtCaret() {
 /* ================================================================
    Load persisted state
    ================================================================ */
-function defaultState() {
+function defaultState(zoom = 1) {
   const id = genId();
   return {
     nodes: {
@@ -124,7 +124,7 @@ function defaultState() {
     arrows: {},
     strokes: [],
     regions: {},
-    viewport: { panX: 0, panY: 0, zoom: 1 },
+    viewport: { panX: 0, panY: 0, zoom },
   };
 }
 
@@ -150,24 +150,51 @@ function applySnapshot(state, snapshot) {
   };
 }
 
+// Default sync: none. Hosts with a server pass their own hook (same signature).
+function useNoSync() {
+  const send = useCallback(() => {}, []);
+  const suppressRef = useRef(false);
+  return { send, users: [], connected: false, suppressRef };
+}
+
 /* ================================================================
-   APP COMPONENT
+   BOARD — the one board editor, shared by every host.
+   ================================================================
+   Hosts (the browser shell src/App.jsx, the Obsidian view) only decide where
+   the board comes from and where it goes; everything a user can do on the
+   board lives here, so a change made here reaches every host.
+
+   initial            { nodes, arrows, regions, strokes, notes?, viewport? } —
+                      null → a fresh board with the welcome node
+   onPersist(graph)   debounced save of { nodes, arrows, regions, strokes, notes, viewport }
+   useSyncHook        ({ getState, applyDelta, replaceState }) → { send, users, connected, suppressRef };
+                      must keep the same identity for the board's lifetime
+   overlay            host UI rendered on top of the board (board picker, login, …)
+   renderRegionExtras (regionId) → extra rows in the region properties panel
+   isolateKeys        stop board keystrokes from reaching the host app (Obsidian)
+   defaultZoom        zoom of a fresh board and of "reset zoom" (0 / fit on empty board)
+   onOpenNote / onRenameNoteFile / bridge — note-backed nodes (Obsidian)
    ================================================================ */
-export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNoteFile, bridge }) {
-  // Local single-file plugin: no accounts, no server, no board list.
+export default function Board({
+  initial = null, onPersist, useSyncHook = useNoSync, overlay = null,
+  renderRegionExtras = null, isolateKeys = false, defaultZoom = 1,
+  onOpenNote, onRenameNoteFile, bridge,
+}) {
   const isMobile = useMobile();
   const rootRef = useRef(null);
-  // nodeId -> vault path for note-backed nodes (plugin-only metadata).
-  const [notes, setNotes] = useState(() => initial.notes || {});
+  // nodeId -> vault path for note-backed nodes.
+  const [notes, setNotes] = useState(() => (initial && initial.notes) || {});
 
   const initialState = () => {
-    const base = defaultState();
+    const base = defaultState(defaultZoom);
+    if (!initial) return base;
     return {
       ...base,
       nodes: initial.nodes || {},
       arrows: initial.arrows || {},
       regions: initial.regions || {},
       strokes: initial.strokes || [],
+      viewport: initial.viewport || base.viewport,
     };
   };
 
@@ -235,7 +262,12 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
   // DSL import modal.
   const [dslOpen, setDslOpen] = useState(false);
   // Properties panel — opens only via the ` hotkey, not on selection.
-  const [propsOpen, setPropsOpen] = useState(false);
+  const [propsOpen, setPropsOpen] = useState(() => {
+    try { return localStorage.getItem('catego-props-open') !== 'false'; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('catego-props-open', String(propsOpen)); } catch { /* storage unavailable */ }
+  }, [propsOpen]);
 
   // Placement tools: toolMode 'node' | 'region' | 'figure' — click or drag on
   // the canvas to create the object (Excalidraw-style). For 'figure', the
@@ -428,15 +460,15 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
     }));
   }, []);
 
-  // No network sync — send() is a no-op; the persistence effect below saves the
-  // whole graph to the .catego file. users/connected/suppressRef are stubs.
-  const send = useCallback(() => {}, []);
-  const users = [];
-  const connected = false;
-  const suppressRef = useRef(false);
+  // eslint-disable-next-line no-unused-vars
+  const { send, users, connected, suppressRef } = useSyncHook({
+    getState: () => stateRef.current,
+    applyDelta,
+    replaceState,
+  });
 
   /* ================================================================
-     Persistence — debounced save to the .catego file
+     Persistence — debounced save to the host (file / localStorage)
      ================================================================ */
   const saveTimer = useRef(null);
   const firstSave = useRef(true);
@@ -450,6 +482,7 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
         regions: state.regions || {},
         strokes: state.strokes || [],
         notes,
+        viewport: state.viewport,
       });
     }, SAVE_DEBOUNCE);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
@@ -490,6 +523,7 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
   // fire — only Obsidian (document-level) is blocked.
   const overRef = useRef(false);
   useEffect(() => {
+    if (!isolateKeys) return;
     const root = rootRef.current;
     const onEnter = () => { overRef.current = true; };
     const onLeave = () => { overRef.current = false; };
@@ -504,7 +538,7 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
       window.removeEventListener('keydown', stop, true);
       window.removeEventListener('keyup', stop, true);
     };
-  }, []);
+  }, [isolateKeys]);
 
   // node → note: when editing a note-backed node ends, rename the vault file to
   // match the node's (new) title. The vault 'rename' event then syncs the path.
@@ -1917,7 +1951,7 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
         e.preventDefault();
         const vp = viewportRef.current;
         const update = onUpdateViewportRef.current;
-        if (update) update({ ...vp, zoom: 1 });
+        if (update) update({ ...vp, zoom: defaultZoom });
       }
     }
     function onUp(e) {
@@ -2417,7 +2451,7 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
   const handleFitView = useCallback(() => {
     const nodeArr = Object.values(nodes);
     if (nodeArr.length === 0) {
-      onUpdateViewport({ panX: 0, panY: 0, zoom: 1 });
+      onUpdateViewport({ panX: 0, panY: 0, zoom: defaultZoom });
       return;
     }
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -2569,6 +2603,7 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
   /* Render */
   return (
     <div className="catego-root" ref={rootRef}>
+      {overlay}
       {/* Tools toolbar (centered, top) — icons only */}
       <div className="toolbar toolbar-tools">
         <button
@@ -2992,6 +3027,23 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
           <div className="props-panel">
             <div className="props-title">{selectedType}</div>
 
+            {/* Color (text color for text nodes) */}
+            <div className="props-group">
+              <span className="props-label">{isTextNode ? 'Text color' : 'Color'}</span>
+              <div className={`color-palette${colorLocked ? ' disabled' : ''}`}>
+                {PALETTE.map((c) => (
+                  <button
+                    key={c}
+                    className={`color-swatch${curColor === c ? ' active' : ''}`}
+                    style={{ background: c }}
+                    onClick={() => { if (!colorLocked) handleColorChange(c); }}
+                    disabled={colorLocked}
+                    title={colorLocked ? 'Color is set by type' : (COLOR_HK[c] ? `${c} (⇧${COLOR_HK[c]})` : c)}
+                  >{COLOR_HK[c] && <span className="hk-pill hk-swatch">{COLOR_HK[c]}</span>}</button>
+                ))}
+              </div>
+            </div>
+
             {/* Type (logic kind) — not for text nodes (they're plain labels). */}
             {!isTextNode && !isRegion && (
               <div className="props-group">
@@ -3028,6 +3080,25 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
               </div>
             )}
 
+            {/* Node: toggles (rounded / NOT / probability) */}
+            {isNode && !isTextNode && (
+              <div className="props-group">
+                <span className="props-label">Node</span>
+                <div className="props-row">
+                  <button
+                    className={`props-btn${sel.negated ? ' active' : ''}`}
+                    onClick={() => onUpdateNode(selectedId, { negated: !sel.negated })}
+                    title="Negate this node (NOT)"
+                  >¬ NOT</button>
+                  <button
+                    className={`props-btn${sel.probability != null ? ' active' : ''}`}
+                    onClick={() => onUpdateNode(selectedId, { probability: sel.probability != null ? null : 50 })}
+                    title="Toggle probability (0–100%)"
+                  >% Prob</button>
+                </div>
+              </div>
+            )}
+
             {/* Status (epistemic state) — claim nodes only. */}
             {isNode && !isTextNode && (
               <div className="props-group">
@@ -3057,23 +3128,6 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
               </div>
             )}
 
-            {/* Color (text color for text nodes) */}
-            <div className="props-group">
-              <span className="props-label">{isTextNode ? 'Text color' : 'Color'}</span>
-              <div className={`color-palette${colorLocked ? ' disabled' : ''}`}>
-                {PALETTE.map((c) => (
-                  <button
-                    key={c}
-                    className={`color-swatch${curColor === c ? ' active' : ''}`}
-                    style={{ background: c }}
-                    onClick={() => { if (!colorLocked) handleColorChange(c); }}
-                    disabled={colorLocked}
-                    title={colorLocked ? 'Color is set by type' : (COLOR_HK[c] ? `${c} (⇧${COLOR_HK[c]})` : c)}
-                  >{COLOR_HK[c] && <span className="hk-pill hk-swatch">{COLOR_HK[c]}</span>}</button>
-                ))}
-              </div>
-            </div>
-
             {/* Region: lock */}
             {isRegion && (
               <div className="props-group">
@@ -3084,7 +3138,13 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
                     onClick={() => onUpdateRegion(selectedId, { locked: !sel.locked })}
                     title="Lock — work inside freely without moving the region (connections still allowed)"
                   >{sel.locked ? '🔒 Locked' : '🔓 Lock'}</button>
+                  <button
+                    className={`props-btn${sel.noFill ? ' active' : ''}`}
+                    onClick={() => onUpdateRegion(selectedId, { noFill: !sel.noFill })}
+                    title="Fill — tint the inside with the region colour, or leave it transparent (outline only)"
+                  >{sel.noFill ? '▢ No fill' : '▣ Fill'}</button>
                 </div>
+                {renderRegionExtras && renderRegionExtras(selectedId)}
               </div>
             )}
 
@@ -3237,25 +3297,6 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
               </div>
             )}
 
-            {/* Node: toggles (rounded / NOT / probability) */}
-            {isNode && !isTextNode && (
-              <div className="props-group">
-                <span className="props-label">Node</span>
-                <div className="props-row">
-                  <button
-                    className={`props-btn${sel.negated ? ' active' : ''}`}
-                    onClick={() => onUpdateNode(selectedId, { negated: !sel.negated })}
-                    title="Negate this node (NOT)"
-                  >¬ NOT</button>
-                  <button
-                    className={`props-btn${sel.probability != null ? ' active' : ''}`}
-                    onClick={() => onUpdateNode(selectedId, { probability: sel.probability != null ? null : 50 })}
-                    title="Toggle probability (0–100%)"
-                  >% Prob</button>
-                </div>
-              </div>
-            )}
-
             {/* Arrow: direction */}
             {isArrow && (
               <div className="props-group">
@@ -3394,6 +3435,15 @@ export default function CategoApp({ initial, onPersist, onOpenNote, onRenameNote
         onOpenNote={onOpenNote}
       />
 
+      {!propsOpen && (
+        <button className="toolbar-btn props-toggle" onClick={() => setPropsOpen(true)} title="Show settings (`)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+          <span className="hk-pill">`</span>
+        </button>
+      )}
       <ModeBadge mode={mode} />
       {showShortcuts && <ShortcutsOverlay onClose={() => setShowShortcuts(false)} />}
       {dslOpen && <DslModal onClose={() => setDslOpen(false)} onImport={onImportDsl} />}

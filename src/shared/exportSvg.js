@@ -112,7 +112,7 @@ function computeBounds(state) {
     if (!from || !to) continue;
     acc(from.x, from.y);
     acc(to.x, to.y);
-    const { midX, midY } = bezierPath(from.x, from.y, arrow.fromAnchor, to.x, to.y, arrow.toAnchor, arrow.fromCtrl, arrow.toCtrl);
+    const { midX, midY } = bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, arrow.fromCtrl, arrow.toCtrl);
     acc(midX - 15, midY - 15);
     acc(midX + 15, midY + 15);
   }
@@ -255,7 +255,7 @@ function renderRegion(r) {
   const color = r.color || '#cf7bf0';
   const parts = [
     `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" rx="8" ry="8" ` +
-      `fill="${color}" fill-opacity="0.08" stroke="${color}" stroke-width="3"/>`,
+      `fill="${r.noFill ? 'none' : color}" fill-opacity="0.08" stroke="${color}" stroke-width="3"/>`,
   ];
   if (r.label && r.label.trim()) {
     parts.push(
@@ -394,8 +394,8 @@ function renderArrow(arrow, state, theme) {
   if (!from || !to) return '';
 
   const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } = (arrow.line === 'elbow' || arrow.line === 'straight')
-    ? elbowPath(from.x, from.y, arrow.fromAnchor, to.x, to.y, arrow.toAnchor)
-    : bezierPath(from.x, from.y, arrow.fromAnchor, to.x, to.y, arrow.toAnchor, arrow.fromCtrl, arrow.toCtrl);
+    ? elbowPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor)
+    : bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, arrow.fromCtrl, arrow.toCtrl);
   const kindDef = arrow.kind ? EDGE_KINDS[arrow.kind] : null;
   const color = kindDef ? kindDef.stroke : (arrow.color || theme.defaultArrow);
   const strokeWidth = kindDef && kindDef.render === 'glyph' ? 1.8 : 2;
@@ -485,7 +485,9 @@ function renderArrow(arrow, state, theme) {
     const b = getPillBounds(arrow, EDGE_KINDS);
     const pw = (b ? b.halfW : 20) * 2;
     const ph = (b ? b.halfH : 15) * 2;
-    const glyph = arrow.kind === 'xor'
+    const glyph = kindDef.icon
+      ? `<path d="${kindDef.icon}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`
+      : arrow.kind === 'xor'
       // XOR — circle quartered by a full-diameter cross.
       ? `<circle r="9" fill="none" stroke="${color}" stroke-width="2"/>` +
         `<line x1="-9" y1="0" x2="9" y2="0" stroke="${color}" stroke-width="2"/>` +

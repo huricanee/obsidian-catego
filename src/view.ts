@@ -1,7 +1,8 @@
 import { TextFileView, WorkspaceLeaf, TFile, Notice } from 'obsidian';
 import { createElement } from 'react';
 import { createRoot, Root } from 'react-dom/client';
-import CategoApp from './CategoApp.jsx';
+// @ts-ignore — the shared board editor (same component the web app renders)
+import Board from './shared/Board.jsx';
 import { CategoBoard, parseBoard, serializeBoard, emptyBoard } from './format';
 
 export const VIEW_TYPE_CATEGO = 'catego-view';
@@ -56,13 +57,14 @@ export class CategoView extends TextFileView {
   private renderBoard() {
     if (!this.root) this.root = createRoot(this.contentEl);
     this.root.render(
-      createElement(CategoApp, {
+      createElement(Board, {
         key: this.reload,
         initial: { nodes: this.board.nodes, arrows: this.board.arrows, regions: this.board.regions, strokes: this.board.strokes, notes: this.board.notes },
         onPersist: (g: any) => this.persist(g),
         onOpenNote: (p: string) => this.openNote(p),
         onRenameNoteFile: (oldPath: string, newTitle: string) => this.renameNoteFile(oldPath, newTitle),
         bridge: this.bridge,
+        isolateKeys: true,
       }),
     );
   }

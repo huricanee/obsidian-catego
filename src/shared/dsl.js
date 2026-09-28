@@ -10,7 +10,7 @@
  *          id : "text"                      (untyped)
  *   EDGE   from OP to [: kind [weight]] ["label"]
  *   OPER   id = op(a, b [, c, ...])         (n-ary logical connective)
- *   REGION id = region(x1, y1, x2, y2 [, #color] [, locked] [, "name"])
+ *   REGION id = region(x1, y1, x2, y2 [, #color] [, locked] [, nofill] [, "name"])
  *   FIGURE id = shape(x, y, w, h [, #color])   shape = rect|square|circle|ellipse|triangle
  *
  *   OP =  ->  forward   |  <-  reverse  |  <->  both  |  --  no arrows
@@ -138,11 +138,12 @@ export function parseDsl(text) {
         if (args.length < 4) { errors.push(`line ${i + 1}: region needs at least x1,y1,x2,y2`); return; }
         const [x1, y1, x2, y2] = args.slice(0, 4).map(Number);
         if ([x1, y1, x2, y2].some(Number.isNaN)) { errors.push(`line ${i + 1}: region coords must be numbers`); return; }
-        const region = { id, x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1), color: null, locked: false, label: '' };
+        const region = { id, x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1), color: null, locked: false, noFill: false, label: '' };
         for (const extra of args.slice(4)) {
           if (/^#[0-9a-fA-F]{3,8}$/.test(extra)) region.color = extra;
           else if (/^"/.test(extra)) region.label = unquote(extra);
           else if (/^(locked|true)$/i.test(extra)) region.locked = true;
+          else if (/^nofill$/i.test(extra)) region.noFill = true;
           else if (/^(unlocked|false)$/i.test(extra)) region.locked = false;
           else errors.push(`line ${i + 1}: region: unrecognized arg "${extra}"`);
         }

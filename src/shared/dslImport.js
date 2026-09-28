@@ -46,7 +46,7 @@ export function buildGraphFromDsl(text, genId, origin = { x: 0, y: 0 }) {
     const x = snap(r.x), y = snap(r.y), w = snap(r.w), h = snap(r.h);
     regionRef[r.id] = cid;
     centre[r.id] = { x: x + w / 2, y: y + h / 2 };
-    return { id: cid, x, y, w, h, color: r.color || '#cf7bf0', locked: !!r.locked, label: r.label || '' };
+    return { id: cid, x, y, w, h, color: r.color || '#cf7bf0', locked: !!r.locked, noFill: !!r.noFill, label: r.label || '' };
   });
 
   if (!parsed.nodes.length) {

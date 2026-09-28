@@ -124,7 +124,10 @@ export const OPERATOR_KINDS = {
   // Everyday-reasoning connectives (the panel's "Reality" group, with
   // therefore): not truth-functional, they mark how real thinking moves.
   because:      { label: 'Because',      text: 'Because',      symbol: '←', stroke: OP_STROKE, arrows: 'forward', rotateWithFlow: true },
-  but:          { label: 'But',          text: 'But',          symbol: 'but', stroke: OP_STROKE, arrows: 'forward', rotateWithFlow: true },
+  // `icon` — SVG path (stroked, centred on 0,0, ~20px) drawn in the pill
+  // instead of `symbol`. But's ☝ stays upright whatever the arrow direction.
+  but:          { label: 'But',          text: 'But',          symbol: '☝', stroke: OP_STROKE, arrows: 'forward',
+                  icon: 'M -2 1 V -8 a 2 2 0 0 1 4 0 V 1 M 2 -0.5 a 1.8 1.8 0 0 1 3.4 0.6 V 1.5 M 5.4 0.6 a 1.7 1.7 0 0 1 3.1 0.9 V 4 a 6 6 0 0 1 -6 6 H 0 a 6 6 0 0 1 -5.4 -3.4 L -7.6 2.4 a 1.7 1.7 0 0 1 2.9 -1.8 L -2 3.6' },
   inOrderTo:    { label: 'In order to',  text: 'In order to',  symbol: '⤳', stroke: OP_STROKE, arrows: 'forward', rotateWithFlow: true },
   // Legacy: boards saved before the rename store kind='consequently'. Kept so
   // they keep rendering; not listed in the order below, so it's absent from the

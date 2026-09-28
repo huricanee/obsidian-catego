@@ -546,13 +546,20 @@
   border-radius: 8px;
   background: color-mix(in srgb, var(--region-color) 8%, transparent);
   border: 3px solid var(--region-color);
+  /* Soft glow around the outline (outer halo + faint inner rim). */
+  box-shadow:
+    0 0 14px 1px color-mix(in srgb, var(--region-color) 35%, transparent),
+    inset 0 0 12px color-mix(in srgb, var(--region-color) 18%, transparent);
   pointer-events: none;
   box-sizing: border-box;
 }
+.wb-region.no-fill { background: transparent; }
 
 .wb-region.selected {
   border-style: solid;
-  box-shadow: 0 0 16px 2px color-mix(in srgb, var(--region-color) 30%, transparent);
+  box-shadow:
+    0 0 22px 3px color-mix(in srgb, var(--region-color) 50%, transparent),
+    inset 0 0 14px color-mix(in srgb, var(--region-color) 24%, transparent);
 }
 
 .region-label {
@@ -976,6 +983,18 @@
 }
 
 /* Object-properties panel — vertical, pinned to the left edge, centered. */
+/* Settings gear — shown in place of the properties panel while it's hidden (`). */
+.toolbar-btn.props-toggle {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  z-index: 102;
+  background: var(--toolbar-bg);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(12px);
+}
+.toolbar-btn.props-toggle:hover { color: var(--accent); }
+
 .props-panel {
   position: fixed;
   left: 16px;
@@ -1572,7 +1591,7 @@
 .board-picker-container {
   position: fixed;
   top: 16px;
-  left: 16px;
+  left: 60px; /* right of the settings gear (.props-toggle) */
   z-index: 102;
 }
 
