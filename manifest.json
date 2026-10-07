@@ -1,7 +1,7 @@
 {
   "id": "catego",
   "name": "Catego",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "minAppVersion": "1.4.0",
   "description": "Argument-mapping canvas: typed nodes and relations, logical operators, regions, and notes-as-nodes. A richer alternative to core Canvas.",
   "author": "huricanee",

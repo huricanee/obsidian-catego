@@ -1,2 +1,4 @@
-- No runtime `<script>` creation in the bundle (fixes the directory review's code-obfuscation error): React is pinned to 18.3.1, and jsPDF's unused "pdfobjectnewwindow" mode — which loaded a script from a CDN — is stripped at build time.
-- Fix: clicking the empty canvas while editing a node now saves the text.
+- New nodes start small (3×2 grid cells) and grow with their text up to 15 cells, then wrap.
+- Slender arrows and smaller connective pills.
+- Negation is shown as a "~" tab on the node's left side.
+- Regions: drawn (not clicked) into existence, node-like rounded corners, outline-only by default (`fill` to tint), and no lock — the inside is inert, the region moves by its border.

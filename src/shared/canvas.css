@@ -53,7 +53,7 @@
 
 .arrow-path {
   fill: none;
-  stroke-width: 2;
+  stroke-width: 1.5;
   pointer-events: stroke;
   cursor: pointer;
 }
@@ -67,7 +67,7 @@
 }
 
 .arrow-path.selected {
-  stroke-width: 3;
+  stroke-width: 2.25;
   filter: drop-shadow(0 0 4px currentColor);
 }
 
@@ -146,7 +146,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 12px 16px;
+  padding: 8px 14px; /* a one-line node fits 2 grid cells (40px) */
   transition: box-shadow 0.2s ease, border-color 0.15s ease;
   z-index: 2;
   overflow: visible;
@@ -300,22 +300,22 @@
 }
 .node-note-open:hover { border-color: var(--accent); transform: scale(1.12); }
 
-/* NOT modifier badge — top-right corner, semantic negation. */
+/* NOT modifier — a "~" tab straddling the middle of the node's left side. */
 .node-not-badge {
   position: absolute;
-  top: -28px;
-  right: -10px;
+  top: 50%;
+  left: -11px;
+  transform: translateY(-50%);
   width: 22px;
   height: 22px;
   border-radius: 50%;
   background: #ff6b6b;
   color: #fff;
-  font: 900 24px/1 ui-sans-serif, system-ui, sans-serif;
+  font: 900 20px/1 ui-sans-serif, system-ui, sans-serif;
   display: flex;
   align-items: center;
   justify-content: center;
-  /* Nudge the glyph slightly so it sits visually centered (¬ baseline is high). */
-  padding-bottom: 2px;
+  padding-bottom: 3px;
   pointer-events: none;
   user-select: none;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45), 0 0 0 2px #0e0e10;
@@ -344,9 +344,6 @@
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
   z-index: 5;
   white-space: nowrap;
-}
-.node-prob-pill.offset-not {
-  right: 18px;     /* shift left to make room for the NOT badge (22px wide, 4px gap) */
 }
 .node-prob-pill:focus {
   border-color: #cf7bf0;
@@ -426,11 +423,6 @@
 .resize-handle.sw { bottom: -4px; left: -4px; cursor: nesw-resize; }
 .resize-handle.se { bottom: -4px; right: -4px; cursor: nwse-resize; }
 
-.wb-node .node-text:empty::before {
-  content: "Type here...";
-  color: var(--text-muted);
-  pointer-events: none;
-}
 
 /* LaTeX rendered view */
 .wb-node .node-text-rendered {
@@ -543,8 +535,8 @@
 
 .wb-region {
   position: absolute;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--region-color) 8%, transparent);
+  border-radius: 20px; /* same as nodes */
+  background: transparent; /* outline only by default; `.filled` tints the inside */
   border: 3px solid var(--region-color);
   /* Soft glow around the outline (outer halo + faint inner rim). */
   box-shadow:
@@ -553,7 +545,7 @@
   pointer-events: none;
   box-sizing: border-box;
 }
-.wb-region.no-fill { background: transparent; }
+.wb-region.filled { background: color-mix(in srgb, var(--region-color) 8%, transparent); }
 
 .wb-region.selected {
   border-style: solid;
@@ -608,11 +600,15 @@
 .region-border-hit {
   position: absolute;
   inset: -8px;
-  border: 12px solid transparent;
-  border-radius: 12px;
+  border-radius: 28px;
   pointer-events: all;
   cursor: grab;
   box-sizing: border-box;
+  /* Only the 16px ring is hit-testable — the inside stays inert, so you can
+     select, draw and drag nodes inside a region without grabbing it. */
+  clip-path: polygon(evenodd,
+    0 0, 100% 0, 100% 100%, 0 100%, 0 0,
+    16px 16px, 16px calc(100% - 16px), calc(100% - 16px) calc(100% - 16px), calc(100% - 16px) 16px, 16px 16px);
 }
 
 .region-border-hit:active {

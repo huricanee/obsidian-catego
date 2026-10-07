@@ -75,6 +75,8 @@ function useMobile() {
 /* ================================================================
    Constants
    ================================================================ */
+// Fresh node: 3×2 grid cells; fits its text up to 15 cells wide.
+const NEW_W = 60, NEW_H = 40;
 const SAVE_DEBOUNCE = 500;
 const MAX_HISTORY = 50;
 // Multi-selection: object type → the Set key in `selection`.
@@ -638,7 +640,9 @@ export default function Board({
 
   const onAddNode = useCallback((x, y) => {
     const id = genId();
-    const node = { id, x, y, text: '', color: '#ffffff', width: 220 };
+    // New nodes start at 3×2 grid cells and widen with their text (fitWidth)
+    // up to MAX_FIT_WIDTH; a manual resize turns fitting off.
+    const node = { id, x, y, text: '', color: '#ffffff', width: NEW_W, height: NEW_H, fitWidth: true };
     setStateWithHistory((prev) => ({
       ...prev,
       nodes: { ...prev.nodes, [id]: node },
@@ -1373,8 +1377,7 @@ export default function Board({
         return;
       }
 
-      const NEW_W = 220, NEW_H = 60;
-
+      
       // Quick-spawn: bare I/J/K/L tap (no WASD during hold) →
       // spawn a child node 4 grid cells away from the source anchor.
       if (!consumed) {
@@ -2110,7 +2113,7 @@ export default function Board({
       const sw = window.innerWidth, sh = window.innerHeight;
       const cx = (sw / 2 - vp.panX) / vp.zoom;
       const cy = (sh / 2 - vp.panY) / vp.zoom;
-      const NEW_W = 220, NEW_H = 60, GRID = 20;
+      const GRID = 20;
       const nx = Math.round((cx - NEW_W / 2) / GRID) * GRID;
       const ny = Math.round((cy - NEW_H / 2) / GRID) * GRID;
       const newId = onAddNodeRef.current(nx, ny);
@@ -2365,7 +2368,8 @@ export default function Board({
       setSelectedType('region');
     } else {
       const id = genId();
-      const node = { id, x, y, width: w, height: h, text: '', color: '#ffffff' };
+      // A plain click (default size) fits the node to its text; a dragged box is a deliberate size.
+      const node = { id, x, y, width: w, height: h, text: '', color: '#ffffff', fitWidth: kind === 'node' && w <= NEW_W && h <= NEW_H };
       if (kind === 'figure') node.shape = shape;
       setStateWithHistory((prev) => ({ ...prev, nodes: { ...prev.nodes, [id]: node } }));
       send({ type: 'node:add', node });
@@ -3144,15 +3148,10 @@ export default function Board({
                 <span className="props-label">Region</span>
                 <div className="props-row">
                   <button
-                    className={`props-btn${sel.locked ? ' active' : ''}`}
-                    onClick={() => onUpdateRegion(selectedId, { locked: !sel.locked })}
-                    title="Lock — work inside freely without moving the region (connections still allowed)"
-                  >{sel.locked ? '🔒 Locked' : '🔓 Lock'}</button>
-                  <button
-                    className={`props-btn${sel.noFill ? ' active' : ''}`}
-                    onClick={() => onUpdateRegion(selectedId, { noFill: !sel.noFill })}
-                    title="Fill — tint the inside with the region colour, or leave it transparent (outline only)"
-                  >{sel.noFill ? '▢ No fill' : '▣ Fill'}</button>
+                    className={`props-btn${sel.fill ? ' active' : ''}`}
+                    onClick={() => onUpdateRegion(selectedId, { fill: !sel.fill })}
+                    title="Fill — tint the inside with the region colour (default: outline only)"
+                  >{sel.fill ? '▣ Filled' : '▢ Fill'}</button>
                 </div>
                 {renderRegionExtras && renderRegionExtras(selectedId)}
               </div>

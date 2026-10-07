@@ -254,8 +254,8 @@ function renderGlyph(glyph, color) {
 function renderRegion(r) {
   const color = r.color || '#cf7bf0';
   const parts = [
-    `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" rx="8" ry="8" ` +
-      `fill="${r.noFill ? 'none' : color}" fill-opacity="0.08" stroke="${color}" stroke-width="3"/>`,
+    `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" rx="20" ry="20" ` +
+      `fill="${r.fill ? color : 'none'}" fill-opacity="0.08" stroke="${color}" stroke-width="3"/>`,
   ];
   if (r.label && r.label.trim()) {
     parts.push(
@@ -354,15 +354,15 @@ function renderNode(n, theme) {
     );
   }
 
-  // Negation badge (top-right)
+  // Negation — "~" tab on the middle of the left side
   if (n.negated) {
-    const cx = n.x + w - 12;
-    const cy = n.y + 12;
+    const cx = n.x;
+    const cy = n.y + h / 2;
     parts.push(
-      `<circle cx="${cx}" cy="${cy}" r="12" fill="${theme.negBadgeBg}"/>` +
-      `<text x="${cx}" y="${cy + 4}" text-anchor="middle" ` +
-        `font-family="system-ui, sans-serif" font-size="14" font-weight="700" ` +
-        `fill="${theme.negBadgeTxt}">&#172;</text>`
+      `<circle cx="${cx}" cy="${cy}" r="11" fill="${theme.negBadgeBg}"/>` +
+      `<text x="${cx}" y="${cy + 5}" text-anchor="middle" ` +
+        `font-family="system-ui, sans-serif" font-size="16" font-weight="900" ` +
+        `fill="${theme.negBadgeTxt}">~</text>`
     );
   }
 
@@ -370,7 +370,7 @@ function renderNode(n, theme) {
   if (n.probability != null) {
     const pillW = 36;
     const pillH = 18;
-    const offset = n.negated ? 30 : 4;
+    const offset = 4;
     const px = n.x + w - pillW - offset;
     const py = n.y + 4;
     parts.push(
@@ -398,7 +398,7 @@ function renderArrow(arrow, state, theme) {
     : bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, arrow.fromCtrl, arrow.toCtrl);
   const kindDef = arrow.kind ? EDGE_KINDS[arrow.kind] : null;
   const color = kindDef ? kindDef.stroke : (arrow.color || theme.defaultArrow);
-  const strokeWidth = kindDef && kindDef.render === 'glyph' ? 1.8 : 2;
+  const strokeWidth = 1.5;
   const dirLocked = kindDef && kindDef.render === 'text';
   const arrowsMode = dirLocked
     ? (kindDef.arrows || 'forward')
@@ -441,12 +441,12 @@ function renderArrow(arrow, state, theme) {
 
   if (arrowsMode === 'forward' || arrowsMode === 'both') {
     parts.push(
-      `<polygon points="${arrowheadPoints(to.x, to.y, cp2x, cp2y, 10)}" fill="${color}"/>`
+      `<polygon points="${arrowheadPoints(to.x, to.y, cp2x, cp2y, 12)}" fill="${color}"/>`
     );
   }
   if (arrowsMode === 'reverse' || arrowsMode === 'both') {
     parts.push(
-      `<polygon points="${arrowheadPoints(from.x, from.y, cp1x, cp1y, 10)}" fill="${color}"/>`
+      `<polygon points="${arrowheadPoints(from.x, from.y, cp1x, cp1y, 12)}" fill="${color}"/>`
     );
   }
 
@@ -468,17 +468,17 @@ function renderArrow(arrow, state, theme) {
       `<g transform="${midXform}">` +
         `<rect x="${-hw}" y="${-hh}" width="${hw * 2}" height="${hh * 2}" ` +
           `rx="${hh}" ry="${hh}" fill="${theme.pillBg}" stroke="${color}" stroke-width="1.8"/>` +
-        `<g transform="translate(${-hw + 15} 0)">${renderGlyph(kindDef.glyph, color)}</g>` +
-        `<line x1="${hw - 30}" y1="${-hh + 5}" x2="${hw - 30}" y2="${hh - 5}" stroke="${color}" stroke-width="1" opacity="0.45"/>` +
-        `<text x="${hw - 15}" y="1" text-anchor="middle" dominant-baseline="middle" fill="${color}" ` +
-          `font-family="system-ui, sans-serif" font-size="13" font-weight="700">${esc(String(weight))}</text>` +
+        `<g transform="translate(${-hw + 13} 0) scale(0.87)">${renderGlyph(kindDef.glyph, color)}</g>` +
+        `<line x1="${hw - 26}" y1="${-hh + 5}" x2="${hw - 26}" y2="${hh - 5}" stroke="${color}" stroke-width="1" opacity="0.45"/>` +
+        `<text x="${hw - 13}" y="1" text-anchor="middle" dominant-baseline="middle" fill="${color}" ` +
+          `font-family="system-ui, sans-serif" font-size="12" font-weight="700">${esc(String(weight))}</text>` +
       `</g>`
     );
   } else if (kindDef && kindDef.render === 'glyph') {
     parts.push(
       `<g transform="${midXform}">` +
-        `<circle r="15" fill="${theme.pillBg}" stroke="${color}" stroke-width="1.8"/>` +
-        renderGlyph(kindDef.glyph, color) +
+        `<circle r="13" fill="${theme.pillBg}" stroke="${color}" stroke-width="1.6"/>` +
+        `<g transform="scale(0.87)">${renderGlyph(kindDef.glyph, color)}</g>` +
       `</g>`
     );
   } else if (kindDef && kindDef.render === 'text') {
@@ -486,14 +486,14 @@ function renderArrow(arrow, state, theme) {
     const pw = (b ? b.halfW : 20) * 2;
     const ph = (b ? b.halfH : 15) * 2;
     const glyph = kindDef.icon
-      ? `<path d="${kindDef.icon}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`
+      ? `<path d="${kindDef.icon}" transform="scale(0.85)" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`
       : arrow.kind === 'xor'
       // XOR — circle quartered by a full-diameter cross.
       ? `<circle r="9" fill="none" stroke="${color}" stroke-width="2"/>` +
         `<line x1="-9" y1="0" x2="9" y2="0" stroke="${color}" stroke-width="2"/>` +
         `<line x1="0" y1="-9" x2="0" y2="9" stroke="${color}" stroke-width="2"/>`
       : `<text x="0" y="1" text-anchor="middle" dominant-baseline="middle" fill="${color}" ` +
-          `font-family="system-ui, sans-serif" font-size="22" font-weight="700">${esc(kindDef.symbol)}</text>`;
+          `font-family="system-ui, sans-serif" font-size="19" font-weight="700">${esc(kindDef.symbol)}</text>`;
     parts.push(
       `<g transform="${midXform}">` +
         `<rect x="${-pw / 2}" y="${-ph / 2}" width="${pw}" height="${ph}" ` +

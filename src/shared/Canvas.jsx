@@ -187,7 +187,9 @@ export function elbowPath(sx, sy, fromAnchor, ex, ey, toAnchor) {
 /* ================================================================
    Utility: arrowhead points at end of curve
    ================================================================ */
-export function arrowheadPoints(ex, ey, cp2x, cp2y, size = 10) {
+// Slender head (long, narrow, slightly notched at the back) — reads like a
+// typeset → rather than a fat triangle. `size` is the head length.
+export function arrowheadPoints(ex, ey, cp2x, cp2y, size = 12) {
   const dx = ex - cp2x;
   const dy = ey - cp2y;
   const len = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -195,11 +197,14 @@ export function arrowheadPoints(ex, ey, cp2x, cp2y, size = 10) {
   const uy = dy / len;
   const px = -uy;
   const py = ux;
-  const x1 = ex - ux * size + px * size * 0.4;
-  const y1 = ey - uy * size + py * size * 0.4;
-  const x2 = ex - ux * size - px * size * 0.4;
-  const y2 = ey - uy * size - py * size * 0.4;
-  return `${ex},${ey} ${x1},${y1} ${x2},${y2}`;
+  const half = size * 0.3;
+  const x1 = ex - ux * size + px * half;
+  const y1 = ey - uy * size + py * half;
+  const x2 = ex - ux * size - px * half;
+  const y2 = ey - uy * size - py * half;
+  const nx = ex - ux * size * 0.8;   // back notch
+  const ny = ey - uy * size * 0.8;
+  return `${ex},${ey} ${x1},${y1} ${nx},${ny} ${x2},${y2}`;
 }
 
 /* ================================================================
@@ -232,11 +237,13 @@ function snap(v) {
    Used to project arrow endpoints to the pill BORDER (not center)
    based on which anchor (top/right/bottom/left) is attached.
    ================================================================ */
-const PILL_TEXT_HALF_W = 20; // pillW=40
-const PILL_TEXT_HALF_H = 15; // pillH=30
-const PILL_GLYPH_HALF  = 15; // circle r=15
-const PILL_WEIGHTED_HALF_W = 30; // widened pill: glyph + editable number
-const PILL_WEIGHTED_HALF_H = 15;
+// Text-fitting nodes grow from 3 to 15 grid cells wide, then wrap.
+const MIN_FIT_WIDTH = 60, MAX_FIT_WIDTH = 300;
+const PILL_TEXT_HALF_W = 17; // pillW=34
+const PILL_TEXT_HALF_H = 13; // pillH=26
+const PILL_GLYPH_HALF  = 13; // circle r=13
+const PILL_WEIGHTED_HALF_W = 26; // widened pill: glyph + editable number
+const PILL_WEIGHTED_HALF_H = 13;
 
 export function getPillBounds(arrow, edgeKinds) {
   const kindDef = arrow.kind ? edgeKinds[arrow.kind] : null;
@@ -1258,7 +1265,7 @@ export default function Canvas({
                   const toAnchor = Math.abs(dx) > Math.abs(dy)
                     ? (dx > 0 ? 'left' : 'right')
                     : (dy > 0 ? 'top' : 'bottom');
-                  const NEW_W = 220;
+                  const NEW_W = 60;
                   const NEW_H = 60;
                   let nx, ny;
                   if (toAnchor === 'left')        { nx = prev.cursorX;             ny = prev.cursorY - NEW_H / 2; }
@@ -1685,9 +1692,6 @@ export default function Canvas({
     onSelect(regionId, 'region');
     const region = regions[regionId];
     if (!region) return;
-    // Locked region: select only — no move/resize (you can still pull
-    // connections from its anchors, which have their own handlers).
-    if (region.locked) return;
     const rect = rootRef.current.getBoundingClientRect();
     const world = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
 
@@ -1962,7 +1966,7 @@ export default function Canvas({
           const heights = nodeHeightRef.current;
           const draggedId = ds.nodeId;
           const draggedSnap = { ...allNodes[draggedId], x: newX, y: newY };
-          const ahSize = vp.zoom < 0.4 ? 16 : 10;
+          const ahSize = vp.zoom < 0.4 ? 18 : 12;
           // Same geometry as render (pill sides, rotation), with the dragged
           // node at its live position.
           const liveNodes = { ...allNodes, [draggedId]: draggedSnap };
@@ -2024,7 +2028,7 @@ export default function Canvas({
             const toCtrl   = ds.end === 'to'   ? ctrl : a.toCtrl;
             const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } =
               bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, fromCtrl, toCtrl);
-            const ahSize = vp.zoom < 0.4 ? 16 : 10;
+            const ahSize = vp.zoom < 0.4 ? 18 : 12;
             // Redraw the arrow's own <g> (paths, arrowheads, midpoint marker).
             const g = arrowGsRef.current[ds.arrowId];
             if (g) {
@@ -2249,11 +2253,12 @@ export default function Canvas({
         if (p && onPlaceObjectRef.current) {
           // Default sizes for a plain click (no real drag).
           const DEF = {
-            node:   { w: 220, h: 80 },
+            node:   { w: 60, h: 40 },
             region: { w: 300, h: 200 },
             figure: (figureShapeRef.current === 'rect' || figureShapeRef.current === 'ellipse') ? { w: 200, h: 120 } : { w: 140, h: 140 },
           };
           let { x, y, w, h } = p;
+          if ((w < 16 || h < 16) && ds.kind === 'region') { dragState.current = null; return; } // regions are drawn, never clicked into existence
           if (w < 16 || h < 16) {
             const d = DEF[ds.kind];
             w = d.w; h = d.h;
@@ -2334,8 +2339,8 @@ export default function Canvas({
           const sx = snap(n.x), sy = snap(n.y);
           const sw = Math.max(60, snap(n.width || 220));
           const sh = Math.max(40, snap(n.height || 60));
-          if (sx !== n.x || sy !== n.y || sw !== n.width || sh !== n.height) {
-            onUpdateNode(ds.nodeId, { x: sx, y: sy, width: sw, height: sh });
+          if (sx !== n.x || sy !== n.y || sw !== n.width || sh !== n.height || n.fitWidth) {
+            onUpdateNode(ds.nodeId, { x: sx, y: sy, width: sw, height: sh, fitWidth: false });
           }
         }
         onNodeDragEnd();
@@ -2690,7 +2695,7 @@ export default function Canvas({
 
     if (st.affectedArrows.length === 0) return;
     const draggedSnap = { ...allNodes[nodeId], x: newX, y: newY };
-    const ahSize = vpRef.current.zoom < 0.4 ? 16 : 10;
+    const ahSize = vpRef.current.zoom < 0.4 ? 18 : 12;
     const liveNodes = { ...allNodes, [nodeId]: draggedSnap };
     const resolvePos = (arrow, end) => resolveEndpoint(arrow, end, liveNodes, allArrows, heights, EDGE_KINDS, regionsRef.current);
     for (const aId of st.affectedArrows) {
@@ -2914,8 +2919,8 @@ export default function Canvas({
     const dashArr = arrow.dash === 1 ? '7 5' : arrow.dash === 2 ? '14 9' : null;
     // Operator pill — single symbol (∧ / ∨ / ⇒ / ⇔).
     const opText = kindDef && kindDef.render === 'text' ? kindDef.symbol : null;
-    const pillW = 40;
-    const pillH = 30;
+    const pillW = PILL_TEXT_HALF_W * 2;
+    const pillH = PILL_TEXT_HALF_H * 2;
     // Rotate directional glyphs (⇒ ⇔ ⊢ ⇀ ≡) along the bezier tangent at
     // the midpoint, so a vertical curve gets the symbol turned 90°.
     const midAngleDeg = (kindDef && kindDef.rotateWithFlow)
@@ -3009,17 +3014,17 @@ export default function Canvas({
               x={-pillW / 2} y={-pillH / 2}
               width={pillW} height={pillH}
               rx={pillH / 2} ry={pillH / 2}
-              fill="#0e0e10" stroke={color} strokeWidth={2}
+              fill="#0e0e10" stroke={color} strokeWidth={1.6}
             />
             {kindDef.icon ? (
-              <path d={kindDef.icon} fill="none" stroke={color} strokeWidth={1.8}
+              <path d={kindDef.icon} transform="scale(0.85)" fill="none" stroke={color} strokeWidth={1.8}
                 strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
             ) : arrow.kind === 'xor' ? (
               /* XOR — a circle quartered by a full-diameter cross. */
               <g pointerEvents="none">
-                <circle r={9} fill="none" stroke={color} strokeWidth={2} />
-                <line x1={-9} y1={0} x2={9} y2={0} stroke={color} strokeWidth={2} />
-                <line x1={0} y1={-9} x2={0} y2={9} stroke={color} strokeWidth={2} />
+                <circle r={8} fill="none" stroke={color} strokeWidth={1.8} />
+                <line x1={-8} y1={0} x2={8} y2={0} stroke={color} strokeWidth={1.8} />
+                <line x1={0} y1={-8} x2={0} y2={8} stroke={color} strokeWidth={1.8} />
               </g>
             ) : (
               <text
@@ -3028,7 +3033,7 @@ export default function Canvas({
                 dominantBaseline="middle"
                 fill={color}
                 pointerEvents="none"
-                style={{ font: '700 22px ui-sans-serif, system-ui, sans-serif' }}
+                style={{ font: '700 19px ui-sans-serif, system-ui, sans-serif' }}
               >
                 {opText}
               </text>
@@ -3056,13 +3061,13 @@ export default function Canvas({
                 x={-pillBounds.halfW} y={-pillBounds.halfH}
                 width={pillBounds.halfW * 2} height={pillBounds.halfH * 2}
                 rx={pillBounds.halfH} ry={pillBounds.halfH}
-                fill="#0e0e10" stroke={color} strokeWidth={1.8}
+                fill="#0e0e10" stroke={color} strokeWidth={1.6}
               />
             ) : (
-              <circle r={15} fill="#0e0e10" stroke={color} strokeWidth={1.8} />
+              <circle r={PILL_GLYPH_HALF} fill="#0e0e10" stroke={color} strokeWidth={1.6} />
             )}
             {/* Glyph icon — shifted into the left half for weighted pills. */}
-            <g transform={kindDef.weighted ? `translate(${-pillBounds.halfW + 15} 0)` : undefined}>
+            <g transform={`${kindDef.weighted ? `translate(${-pillBounds.halfW + 13} 0) ` : ''}scale(0.87)`}>
             {kindDef.glyph === 'plus' && (
               <>
                 <line x1={-7.5} y1={0} x2={7.5} y2={0} stroke={color} strokeWidth={2.5} strokeLinecap="round" />
@@ -3557,13 +3562,13 @@ export default function Canvas({
         )}
         {/* NOT modifier — top-right corner. Negation of this node's claim. */}
         {node.negated && (
-          <div className="node-not-badge" title="Negated (NOT)">¬</div>
+          <div className="node-not-badge" title="Negated (NOT)">~</div>
         )}
         {/* Probability — editable percentage in top-right corner. Sits left of
             the NOT badge when both are enabled. */}
         {node.probability != null && (
           <div
-            className={`node-prob-pill${node.negated ? ' offset-not' : ''}`}
+            className="node-prob-pill"
             contentEditable
             suppressContentEditableWarning
             onMouseDown={(e) => e.stopPropagation()}
@@ -3612,13 +3617,26 @@ export default function Canvas({
             onInput={(e) => {
               const el = e.target.closest('.wb-node');
               if (el) {
+                // fitWidth: widen to the longest unwrapped line (padding included),
+                // between MIN_FIT_WIDTH and MAX_FIT_WIDTH; beyond that, wrap.
+                let fitted = null;
+                if (node.fitWidth) {
+                  const span = e.target;
+                  const prevWs = span.style.whiteSpace;
+                  span.style.whiteSpace = 'pre';
+                  const cs = getComputedStyle(el);
+                  const extra = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth);
+                  fitted = Math.min(MAX_FIT_WIDTH, Math.max(MIN_FIT_WIDTH, Math.ceil((span.scrollWidth + extra) / GRID_SIZE) * GRID_SIZE));
+                  span.style.whiteSpace = prevWs;
+                  if (fitted !== (node.width || 220)) el.style.width = fitted + 'px';
+                }
                 el.style.minHeight = 'auto';
                 const natural = el.offsetHeight;
                 // Grow to fit content, but never shrink below the node's set
                 // height — so figures and resized nodes don't collapse when
                 // you start typing into them. snap() the floor so a stray
                 // fractional height can't propagate through the grow path.
-                const floor = Math.max(60, snap(node.height || 0));
+                const floor = Math.max(40, snap(node.height || 0));
                 const snapped = Math.max(floor, Math.ceil(natural / GRID_SIZE) * GRID_SIZE);
                 el.style.minHeight = snapped + 'px';
                 // Grow symmetrically around the node's vertical centre so the
@@ -3632,8 +3650,10 @@ export default function Canvas({
                   growthCenterRef.current[node.id] = centerY;
                 }
                 const newY = snap(centerY - snapped / 2);
-                if (newY !== node.y) onUpdateNode(node.id, { height: snapped, y: newY });
-                else onUpdateNode(node.id, { height: snapped });
+                const upd = { height: snapped };
+                if (newY !== node.y) upd.y = newY;
+                if (fitted != null && fitted !== node.width) upd.width = fitted;
+                onUpdateNode(node.id, upd);
               }
             }}
           >
@@ -3707,27 +3727,16 @@ export default function Canvas({
             const isRegionSelected = (selectedType === 'region' && selectedId === region.id) || (selection.regionIds && selection.regionIds.has(region.id));
             const color = region.color || '#cf7bf0';
             return (
-              <div key={region.id} className={`wb-region${isRegionSelected ? ' selected' : ''}${region.locked ? ' locked' : ''}${region.noFill ? ' no-fill' : ''}`}
-                style={{ left: region.x, top: region.y, width: region.w, height: region.h, '--region-color': color,
-                  // In select mode the body is grabbable (move) — unless locked,
-                  // in which case the interior passes clicks through so you can
-                  // work freely inside without nudging the region.
-                  pointerEvents: (toolMode === 'select' && !region.locked) ? 'auto' : undefined }}
-                onMouseDown={(e) => { if (toolMode === 'select') onRegionBorderMouseDown(e, region.id); }}>
+              // The interior is inert (pointer-events none in CSS): you work inside
+              // freely; the region moves by its border (.region-border-hit).
+              <div key={region.id} className={`wb-region${isRegionSelected ? ' selected' : ''}${region.fill ? ' filled' : ''}`}
+                style={{ left: region.x, top: region.y, width: region.w, height: region.h, '--region-color': color }}>
                 <span className="region-label" contentEditable suppressContentEditableWarning style={{ color }}
                   onMouseDown={(e) => e.stopPropagation()}
                   onBlur={(e) => onUpdateRegionRef.current(region.id, { label: e.target.textContent || '' })}>
                   {region.label || ''}
                 </span>
-                {region.locked && (
-                  <div className="region-lock" style={{ color }} title="Locked — click to select & unlock"
-                    onMouseDown={(e) => { e.stopPropagation(); onSelect(region.id, 'region'); }}>
-                    🔒
-                  </div>
-                )}
-                {!region.locked && (
-                  <div className="region-border-hit" onMouseDown={(e) => onRegionBorderMouseDown(e, region.id)} />
-                )}
+                <div className="region-border-hit" onMouseDown={(e) => onRegionBorderMouseDown(e, region.id)} />
                 {ANCHORS.map((a) => (
                   <div
                     key={a}
@@ -3736,7 +3745,7 @@ export default function Canvas({
                     onMouseDown={(e) => onRegionAnchorMouseDown(e, region.id, a)}
                   />
                 ))}
-                {isRegionSelected && !region.locked && ['nw', 'ne', 'sw', 'se'].map((corner) => (
+                {isRegionSelected && ['nw', 'ne', 'sw', 'se'].map((corner) => (
                   <div key={corner} className={`resize-handle ${corner}`} style={{ background: color }}
                     onMouseDown={(e) => onRegionResizeMouseDown(e, region.id, corner)} />
                 ))}
