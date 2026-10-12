@@ -300,26 +300,27 @@
 }
 .node-note-open:hover { border-color: var(--accent); transform: scale(1.12); }
 
-/* NOT modifier — a "~" tab straddling the middle of the node's left side. */
-.node-not-badge {
+/* NOT — the node is one grid cell wider to the left. That cell keeps the
+   node's background, is outlined in red (its right edge is the divider), and
+   a red "~" sits astride the divider. */
+.node-not-strip {
   position: absolute;
-  top: 50%;
-  left: -11px;
-  transform: translateY(-50%);
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: #ff6b6b;
-  color: #fff;
-  font: 900 20px/1 ui-sans-serif, system-ui, sans-serif;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding-bottom: 3px;
+  top: -1px; bottom: -1px; left: -1px;
+  width: 21px;
+  border: 1.5px solid #ff6b6b;
+  border-radius: 20px 0 0 20px;
+  box-sizing: border-box;
   pointer-events: none;
   user-select: none;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45), 0 0 0 2px #0e0e10;
-  z-index: 6;
+  z-index: 1;
+}
+.node-not-mark {
+  position: absolute;
+  top: 50%; left: calc(100% - 10px); /* half a cell left of the divider */
+  transform: translate(-50%, -50%);
+  color: #ff6b6b;
+  font: 400 20px/1 ui-sans-serif, system-ui, sans-serif;
+  padding-bottom: 2px;
 }
 
 /* Probability pill — top-right corner, editable percentage. When the NOT
@@ -1794,4 +1795,40 @@
   .toolbar-divider {
     height: 20px;
   }
+}
+
+/* Formula window (linear reading of a node / sub-formula). */
+.formula-big {
+  font: 500 28px/1.4 ui-serif, Georgia, "Times New Roman", serif;
+  color: var(--text);
+  padding: 18px 6px 10px;
+  word-break: break-word;
+}
+.formula-tex {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #0e0e14;
+  border: 1px solid var(--border);
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Live LaTeX preview under the node being edited. */
+.edit-preview {
+  position: absolute;
+  max-width: 420px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.35;
+  pointer-events: none;
+  z-index: 5;
+  white-space: pre-wrap;
 }

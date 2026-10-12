@@ -9,14 +9,15 @@
  *   NODE   id : [!][kind] "text" [#status] [%prob] [(WxH)] [@x,y] [@#rrggbb]
  *          id : "text"                      (untyped)
  *   EDGE   from OP to [: kind [weight]] ["label"]
- *   OPER   id = op(a, b [, c, ...])         (n-ary logical connective)
+ *   OPER   id = op(a, b [, c, ...])         (n-ary logical connective; an arg may be another
+ *                                            operator's id — nesting = parentheses)
  *   REGION id = region(x1, y1, x2, y2 [, #color] [, fill] [, "name"])   (fill = tinted inside; default outline only)
  *   FIGURE id = shape(x, y, w, h [, #color])   shape = rect|square|circle|ellipse|triangle
  *
  *   OP =  ->  forward   |  <-  reverse  |  <->  both  |  --  no arrows
  *         =>  implies (sugar)            |  <=>  equivalently (sugar)
  *   op = and | or | xor | implies | therefore | equivalently | identical
- *   !       leading bang on a node = negated (¬)
+ *   !       leading bang on a node = negated (¬); `id = !and(a, b)` negates a sub-formula
  *   %NN     node probability pill (0–100)
  *   @x,y    explicit node position (pixels); without it dagre lays the node out
  *   weight  number after a prob± edge kind = probability weight (0–100)
@@ -66,7 +67,8 @@ const SHAPE_NAMES = new Set(['rect', 'square', 'circle', 'ellipse', 'triangle'])
 
 const ID = '[A-Za-z0-9_]+';
 // `id = fn( args )` — operator or region assignment.
-const FUNC_RE = new RegExp(`^(${ID})\\s*=\\s*([A-Za-z][A-Za-z0-9_]*)\\s*\\((.*)\\)\\s*$`);
+// `id = [!]fn( args )` — operator (a leading ! negates the whole sub-formula), region or figure.
+const FUNC_RE = new RegExp(`^(${ID})\\s*=\\s*(!?)\\s*([A-Za-z][A-Za-z0-9_]*)\\s*\\((.*)\\)\\s*$`);
 
 // Split a function arg list on top-level commas (respecting "quoted" strings).
 function splitArgs(s) {
@@ -130,7 +132,7 @@ export function parseDsl(text) {
     // id = fn(args) — operator or region.
     const fm = line.match(FUNC_RE);
     if (fm) {
-      const [, id, fnRaw, argStr] = fm;
+      const [, id, negRaw, fnRaw, argStr] = fm;
       const fn = fnRaw.toLowerCase();
       const args = splitArgs(argStr);
 
@@ -170,7 +172,7 @@ export function parseDsl(text) {
         const ids = args.map(unquote);
         ids.forEach(ensureNode);
         const [from, to, ...rest] = ids;
-        edges.push({ id, from, to, kind, label: null, direction: null, participants: rest, operator: true });
+        edges.push({ id, from, to, kind, label: null, direction: null, participants: rest, operator: true, negated: !!negRaw });
         return;
       }
 
@@ -227,8 +229,11 @@ export function parseDsl(text) {
   // Endpoints that name a declared region were auto-created as phantom nodes —
   // drop them so they resolve to the region instead.
   const regionIds = new Set(regions.map((r) => r.id));
+  // Likewise endpoints that name an operator: `a2 = implies(a1, r)` nests the
+  // pill a1 (the parenthesised sub-formula), it does not create a node "a1".
+  const opIds = new Set(edges.filter((e) => e.operator && e.id).map((e) => e.id));
   for (const [id, n] of nodes) {
-    if (!n.declared && regionIds.has(id)) nodes.delete(id);
+    if (!n.declared && (regionIds.has(id) || opIds.has(id))) nodes.delete(id);
   }
 
   return { nodes: Array.from(nodes.values()), edges, regions, errors };

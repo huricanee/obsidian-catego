@@ -118,9 +118,12 @@ export const OPERATOR_KINDS = {
   and:          { label: 'AND',          text: 'AND',          symbol: '∧', stroke: OP_STROKE, arrows: 'none'    },
   or:           { label: 'OR',           text: 'OR',           symbol: '∨', stroke: OP_STROKE, arrows: 'none'    },
   xor:          { label: 'XOR',          text: 'XOR',          symbol: '⊕', stroke: OP_STROKE, arrows: 'none'    },
-  implies:      { label: 'Implies',      text: 'Implies',      symbol: '⇒', stroke: OP_STROKE, arrows: 'forward', rotateWithFlow: true },
+  // ⇒ / ⇔ are drawn as paths (glyph fonts sit off-centre in the pill).
+  implies:      { label: 'Implies',      text: 'Implies',      symbol: '⇒', stroke: OP_STROKE, arrows: 'forward', rotateWithFlow: true,
+                  icon: 'M -8 -2.2 H 6 M -8 2.2 H 6 M 3.5 -6 L 9.5 0 L 3.5 6' },
   therefore:    { label: 'Therefore',    text: 'Therefore',    symbol: '→', stroke: OP_STROKE, arrows: 'forward', rotateWithFlow: true },
-  equivalently: { label: 'Equivalently', text: 'Equivalently', symbol: '⇔', stroke: OP_STROKE, arrows: 'both',    rotateWithFlow: true },
+  equivalently: { label: 'Equivalently', text: 'Equivalently', symbol: '⇔', stroke: OP_STROKE, arrows: 'both',    rotateWithFlow: true,
+                  icon: 'M -6 -2.2 H 6 M -6 2.2 H 6 M -3.5 -6 L -9.5 0 L -3.5 6 M 3.5 -6 L 9.5 0 L 3.5 6' },
   // Everyday-reasoning connectives (the panel's "Reality" group, with
   // therefore): not truth-functional, they mark how real thinking moves.
   because:      { label: 'Because',      text: 'Because',      symbol: '←', stroke: OP_STROKE, arrows: 'forward', rotateWithFlow: true },

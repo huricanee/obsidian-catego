@@ -9,8 +9,8 @@
  *
  * Known lossiness (grammar has no syntax for these yet):
  *  - arrow anchors are recomputed from positions on re-import, not preserved;
- *  - free-floating arrow endpoints (fromPoint/toPoint) and pill→pill nesting
- *    are skipped (reported in `warnings`);
+ *  - free-floating arrow endpoints (fromPoint/toPoint) are skipped (reported
+ *    in `warnings`); pill→pill nesting round-trips as `b = op(a, …)`;
  *  - node text is single-line (newlines collapsed, embedded " → ').
  */
 import { OPERATOR_KINDS } from './argTypes.js';
@@ -70,7 +70,7 @@ function arrowLine(a, warnings) {
   const kind = a.kind === 'consequently' ? 'implies' : a.kind; // legacy rename
   if (kind && OPERATOR_SET.has(kind)) {
     const refs = [f.id, t.id, ...(a.participants || []).map((p) => p.nodeId).filter(Boolean)];
-    return `${a.id} = ${kind}(${refs.join(', ')})`;
+    return `${a.id} = ${a.negated ? '!' : ''}${kind}(${refs.join(', ')})`;
   }
 
   // Relations → arrow form. Reverse is normalised to a forward arrow (swap ends).

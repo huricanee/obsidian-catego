@@ -16,14 +16,46 @@ export const ANCHORS = ['top', 'right', 'bottom', 'left'];
 /* ================================================================
    Utility: get anchor world position for a node
    ================================================================ */
+// Negation widens a node / operator pill by one grid cell to the LEFT: that red
+// strip (with a "~" badge in its corner) is the ¬. Geometry treats the strip
+// as part of the shape, so the left anchor sits on the strip's edge.
+export const NOT_STRIP = 20;
+
+// Pills that follow the curve snap to the nearest quarter turn, so glyphs and
+// the ¬ strip never sit at odd angles. Result ∈ {0, 90, 180, -90}.
+export function snapAngle(deg) {
+  let a = Math.round((deg || 0) / 90) * 90;
+  a = ((a % 360) + 360) % 360;
+  return a > 180 ? a - 360 : a;
+}
+// Which LOCAL side of a pill rotated by `deg` faces screen-left — where the ¬
+// strip goes, so negation always reads on the left whatever the rotation.
+export function notSideFor(deg) {
+  switch (snapAngle(deg)) {
+    case 180: return { lx: 1, ly: 0 };    // local right
+    case 90:  return { lx: 0, ly: 1 };    // local bottom
+    case -90: return { lx: 0, ly: -1 };   // local top
+    default:  return { lx: -1, ly: 0 };   // local left
+  }
+}
+// Local-frame outline of the ¬ strip (one grid cell) hugging side S of a pill
+// of half-size (w, h); closes along the pill edge, which is the divider.
+export function notStripPath(S, w, h, d = NOT_STRIP) {
+  if (S.lx < 0) return `M ${-w} ${-h} H ${-w - d + h} A ${h} ${h} 0 0 0 ${-w - d + h} ${h} H ${-w} Z`;
+  if (S.lx > 0) return `M ${w} ${-h} H ${w + d - h} A ${h} ${h} 0 0 1 ${w + d - h} ${h} H ${w} Z`;
+  if (S.ly < 0) return `M ${-w} ${-h} V ${-h - d + h} A ${h} ${h} 0 0 1 ${-w + h} ${-h - d} H ${w - h} A ${h} ${h} 0 0 1 ${w} ${-h - d + h} V ${-h} Z`;
+  return `M ${-w} ${h} V ${h + d - h} A ${h} ${h} 0 0 0 ${-w + h} ${h + d} H ${w - h} A ${h} ${h} 0 0 0 ${w} ${h + d - h} V ${h} Z`;
+}
 export function getAnchorPos(node, anchor, heightMap) {
   const w = node.width || 220;
   const h = node.height || (heightMap && heightMap[node.id]) || 60;
+  // The drawn box includes the ¬ cell, so its centre shifts half a cell left.
+  const cx = node.x + w / 2 - (node.negated ? NOT_STRIP / 2 : 0);
   switch (anchor) {
-    case 'top':    return { x: node.x + w / 2, y: node.y };
-    case 'right':  return { x: node.x + w,     y: node.y + h / 2 };
-    case 'bottom': return { x: node.x + w / 2, y: node.y + h };
-    case 'left':   return { x: node.x,         y: node.y + h / 2 };
+    case 'top':    return { x: cx,         y: node.y };
+    case 'right':  return { x: node.x + w, y: node.y + h / 2 };
+    case 'bottom': return { x: cx,         y: node.y + h };
+    case 'left':   return { x: node.x - (node.negated ? NOT_STRIP : 0), y: node.y + h / 2 };
     default:       return { x: node.x + w / 2, y: node.y + h / 2 };
   }
 }
@@ -92,8 +124,10 @@ export function bezierPath(sx, sy, fromAnchor, ex, ey, toAnchor, fromCtrl, toCtr
   // Midpoint of cubic bezier at t=0.5
   const midX = 0.125 * sx + 0.375 * cp1x + 0.375 * cp2x + 0.125 * ex;
   const midY = 0.125 * sy + 0.375 * cp1y + 0.375 * cp2y + 0.125 * ey;
+  // Tangent there (the derivative at t=½), for anything drawn aligned with the curve.
+  const midAngle = Math.atan2((cp2y + ey) - (sy + cp1y), (cp2x + ex) - (sx + cp1x)) * 180 / Math.PI;
 
-  return { path: `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${ex} ${ey}`, cp1x, cp1y, cp2x, cp2y, midX, midY };
+  return { path: `M ${sx} ${sy} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${ex} ${ey}`, cp1x, cp1y, cp2x, cp2y, midX, midY, midAngle };
 }
 
 /* ================================================================
@@ -111,6 +145,7 @@ export function straightPath(sx, sy, ex, ey) {
     cp1x: sx + ux * off, cp1y: sy + uy * off,
     cp2x: ex - ux * off, cp2y: ey - uy * off,
     midX: (sx + ex) / 2, midY: (sy + ey) / 2,
+    midAngle: Math.atan2(dy, dx) * 180 / Math.PI,
   };
 }
 
@@ -175,12 +210,16 @@ function polyMidpoint(pts) {
 export function elbowPath(sx, sy, fromAnchor, ex, ey, toAnchor) {
   const pts = elbowPoints(sx, sy, fromAnchor, ex, ey, toAnchor);
   const [midX, midY] = polyMidpoint(pts);
+  // Orientation at the midpoint: the segment the midpoint lies on.
+  let midAngle = 0;
+  { let acc = 0; const total = pts.slice(1).reduce((t, p, i) => t + Math.hypot(p[0] - pts[i][0], p[1] - pts[i][1]), 0);
+    for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); if (acc + d >= total / 2 || i === pts.length - 1) { midAngle = Math.atan2(pts[i][1] - pts[i - 1][1], pts[i][0] - pts[i - 1][0]) * 180 / Math.PI; break; } acc += d; } }
   // cp1/cp2 = neighbours of the endpoints → correct arrowhead orientation.
   return {
     path: roundedPolyPath(pts, 16),
     cp1x: pts[1][0], cp1y: pts[1][1],
     cp2x: pts[pts.length - 2][0], cp2y: pts[pts.length - 2][1],
-    midX, midY,
+    midX, midY, midAngle,
   };
 }
 
@@ -237,13 +276,35 @@ function snap(v) {
    Used to project arrow endpoints to the pill BORDER (not center)
    based on which anchor (top/right/bottom/left) is attached.
    ================================================================ */
-// Text-fitting nodes grow from 3 to 15 grid cells wide, then wrap.
-const MIN_FIT_WIDTH = 60, MAX_FIT_WIDTH = 300;
+// A fresh node is 3×2 grid cells; text-fitting nodes grow up to 15 cells wide, then wrap.
+// Single source of truth for every spawn path (click, N, I/J/K/L, drag-to-empty, double-click).
+export const NEW_NODE_W = 60, NEW_NODE_H = 40;
+const MIN_FIT_WIDTH = NEW_NODE_W, MAX_FIT_WIDTH = 300;
 const PILL_TEXT_HALF_W = 17; // pillW=34
 const PILL_TEXT_HALF_H = 13; // pillH=26
 const PILL_GLYPH_HALF  = 13; // circle r=13
 const PILL_WEIGHTED_HALF_W = 26; // widened pill: glyph + editable number
 const PILL_WEIGHTED_HALF_H = 13;
+
+/** Arrowhead placement for an arrow: 'none' | 'forward' | 'reverse' | 'both'. */
+export function arrowsModeOf(arrow, kindDef) {
+  const dirLocked = kindDef && kindDef.render === 'text';
+  return dirLocked ? (kindDef.arrows || 'forward')
+    : (arrow.direction || (arrow.bidirectional ? 'both' : (kindDef ? (kindDef.arrows || 'forward') : 'forward')));
+}
+
+/** The stroke stops at the arrowhead's back notch instead of running under the
+ *  head to the tip, so the line visibly meets the head. Bezier paths only. */
+export function headedPath(geo, mode, size = 12) {
+  const m = geo.path.match(/^M (\S+) (\S+) C (\S+) (\S+), (\S+) (\S+), (\S+) (\S+)$/);
+  if (!m) return geo.path;
+  let [sx, sy, c1x, c1y, c2x, c2y, ex, ey] = m.slice(1).map(Number);
+  const back = size * 0.8;
+  const pull = (px, py, cx, cy) => { const dx = px - cx, dy = py - cy, l = Math.hypot(dx, dy) || 1; return [px - dx / l * back, py - dy / l * back]; };
+  if (mode === 'forward' || mode === 'both') [ex, ey] = pull(ex, ey, c2x, c2y);
+  if (mode === 'reverse' || mode === 'both') [sx, sy] = pull(sx, sy, c1x, c1y);
+  return `M ${sx} ${sy} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${ex} ${ey}`;
+}
 
 export function getPillBounds(arrow, edgeKinds) {
   const kindDef = arrow.kind ? edgeKinds[arrow.kind] : null;
@@ -278,27 +339,31 @@ export function resolveEndpoint(arrow, end, nodes, arrows, heights, edgeKinds, r
     const hf = resolveEndpoint(host, 'from', nodes, arrows, heights, edgeKinds, regions, depth + 1);
     const ht = resolveEndpoint(host, 'to',   nodes, arrows, heights, edgeKinds, regions, depth + 1);
     if (!hf || !ht) return null;
-    const { midX, midY, cp1x, cp1y, cp2x, cp2y } = bezierPath(hf.x, hf.y, hf.anchor, ht.x, ht.y, ht.anchor, host.fromCtrl, host.toCtrl);
+    const { midX, midY, midAngle } = bezierPath(hf.x, hf.y, hf.anchor, ht.x, ht.y, ht.anchor, host.fromCtrl, host.toCtrl);
     const b = getPillBounds(host, edgeKinds);
     if (!b || centerOnly) return { x: midX, y: midY, anchor: null };
     // The pill is drawn rotated along its curve for rotateWithFlow kinds.
     const hk = host.kind ? edgeKinds[host.kind] : null;
-    const ang = hk && hk.rotateWithFlow ? Math.atan2(cp2y - cp1y, cp2x - cp1x) : 0;
+    const deg = hk && hk.rotateWithFlow ? snapAngle(midAngle) : 0;
+    const ang = deg * Math.PI / 180;
     const cos = Math.cos(ang), sin = Math.sin(ang);
-    // Enter/leave through the side that faces the arrow's other end — never
-    // the centre. (A pill-to-pill arrow aims at the other pill's centre.)
-    const other = resolveEndpoint(arrow, end === 'from' ? 'to' : 'from', nodes, arrows, heights, edgeKinds, regions, depth + 1, true);
-    let lx, ly; // chosen side in the pill's local frame (unit direction)
-    if (other) {
-      const dx = other.x - midX, dy = other.y - midY;
+    // The side is the one the arrow was attached to (top/right/bottom/left in
+    // the pill's own, possibly rotated, frame) — it stays put as things move.
+    // Only an arrow with no stored side picks the side facing its other end.
+    let lx, ly; // side in the pill's local frame (unit direction)
+    const n = typeof anchor === 'string' ? anchorNormal(anchor) : null;
+    if (n) { lx = n.nx; ly = n.ny; }
+    else {
+      const other = resolveEndpoint(arrow, end === 'from' ? 'to' : 'from', nodes, arrows, heights, edgeKinds, regions, depth + 1, true);
+      const dx = other ? other.x - midX : 1, dy = other ? other.y - midY : 0;
       const ox = dx * cos + dy * sin, oy = -dx * sin + dy * cos;
       if (Math.abs(ox) * b.halfH >= Math.abs(oy) * b.halfW) { lx = ox >= 0 ? 1 : -1; ly = 0; }
       else { lx = 0; ly = oy >= 0 ? 1 : -1; }
-    } else {
-      const n = anchorNormal(anchor) || { nx: 1, ny: 0 };
-      lx = n.nx; ly = n.ny;
     }
-    const px = lx * b.halfW, py = ly * b.halfH;
+    // A negated operator is one grid cell wider on its screen-left side (the ¬ strip).
+    const S = host.negated ? notSideFor(deg) : null;
+    const onStrip = S && S.lx === lx && S.ly === ly;
+    const px = lx * (b.halfW + (onStrip && lx ? NOT_STRIP : 0)), py = ly * (b.halfH + (onStrip && ly ? NOT_STRIP : 0));
     return {
       x: midX + px * cos - py * sin,
       y: midY + px * sin + py * cos,
@@ -1265,8 +1330,8 @@ export default function Canvas({
                   const toAnchor = Math.abs(dx) > Math.abs(dy)
                     ? (dx > 0 ? 'left' : 'right')
                     : (dy > 0 ? 'top' : 'bottom');
-                  const NEW_W = 60;
-                  const NEW_H = 60;
+                  const NEW_W = NEW_NODE_W;
+                  const NEW_H = NEW_NODE_H;
                   let nx, ny;
                   if (toAnchor === 'left')        { nx = prev.cursorX;             ny = prev.cursorY - NEW_H / 2; }
                   else if (toAnchor === 'right')  { nx = prev.cursorX - NEW_W;     ny = prev.cursorY - NEW_H / 2; }
@@ -1977,12 +2042,13 @@ export default function Canvas({
             const from = resolvePos(a, 'from');
             const to   = resolvePos(a, 'to');
             if (!from || !to) continue;
-            const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } = bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, a.fromCtrl, a.toCtrl);
+            const { path, cp1x, cp1y, cp2x, cp2y, midX, midY, midAngle } = bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, a.fromCtrl, a.toCtrl);
             const g = arrowGsRef.current[aId];
             if (!g) continue;
             // Both <path> children (hit + visible) get the same `d`
             const paths = g.querySelectorAll(':scope > path');
-            for (const p of paths) p.setAttribute('d', path);
+            const dPath = headedPath({ path }, arrowsModeOf(a, a.kind ? EDGE_KINDS[a.kind] : null), ahSize);
+            for (const p of paths) p.setAttribute('d', dPath);
             // Arrowheads: 0, 1 or 2 depending on kind.
             // JSX order is forward-arrowhead first, then back-arrowhead.
             const polygons = g.querySelectorAll('polygon.arrow-marker');
@@ -1993,12 +2059,9 @@ export default function Canvas({
             // Include rotation when the kind opts in to align with curve flow.
             const aKindDef = a.kind ? EDGE_KINDS[a.kind] : null;
             let mt = `translate(${midX} ${midY})`;
-            if (aKindDef && aKindDef.rotateWithFlow) {
-              const ang = Math.atan2(cp2y - cp1y, cp2x - cp1x) * 180 / Math.PI;
-              mt += ` rotate(${ang})`;
-            }
+            if (aKindDef && aKindDef.rotateWithFlow) mt += ` rotate(${snapAngle(midAngle)})`;
             const midGroups = g.querySelectorAll(':scope > g');
-            for (const mg of midGroups) mg.setAttribute('transform', mt);
+            for (const mg of midGroups) mg.setAttribute('transform', mg.classList.contains('arrow-not') ? `translate(${midX} ${midY})` : mt);
             const fo = g.querySelector(':scope > foreignObject');
             if (fo) {
               fo.setAttribute('x', midX - 84);
@@ -2026,25 +2089,23 @@ export default function Canvas({
             // Use the new ctrl for the dragged side, committed ctrl for the other.
             const fromCtrl = ds.end === 'from' ? ctrl : a.fromCtrl;
             const toCtrl   = ds.end === 'to'   ? ctrl : a.toCtrl;
-            const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } =
+            const { path, cp1x, cp1y, cp2x, cp2y, midX, midY, midAngle } =
               bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, fromCtrl, toCtrl);
             const ahSize = vp.zoom < 0.4 ? 18 : 12;
             // Redraw the arrow's own <g> (paths, arrowheads, midpoint marker).
             const g = arrowGsRef.current[ds.arrowId];
             if (g) {
               const paths = g.querySelectorAll(':scope > path');
-              for (const p of paths) p.setAttribute('d', path);
+              const aKindDef = a.kind ? EDGE_KINDS[a.kind] : null;
+              const dPath = headedPath({ path }, arrowsModeOf(a, aKindDef), ahSize);
+              for (const p of paths) p.setAttribute('d', dPath);
               const polygons = g.querySelectorAll('polygon.arrow-marker');
               if (polygons.length >= 1) polygons[0].setAttribute('points', arrowheadPoints(to.x, to.y, cp2x, cp2y, ahSize));
               if (polygons.length >= 2) polygons[1].setAttribute('points', arrowheadPoints(from.x, from.y, cp1x, cp1y, ahSize));
-              const aKindDef = a.kind ? EDGE_KINDS[a.kind] : null;
               let mt = `translate(${midX} ${midY})`;
-              if (aKindDef && aKindDef.rotateWithFlow) {
-                const ang = Math.atan2(cp2y - cp1y, cp2x - cp1x) * 180 / Math.PI;
-                mt += ` rotate(${ang})`;
-              }
+              if (aKindDef && aKindDef.rotateWithFlow) mt += ` rotate(${snapAngle(midAngle)})`;
               const midGroups = g.querySelectorAll(':scope > g');
-              for (const mg of midGroups) mg.setAttribute('transform', mt);
+              for (const mg of midGroups) mg.setAttribute('transform', mg.classList.contains('arrow-not') ? `translate(${midX} ${midY})` : mt);
               const fo = g.querySelector(':scope > foreignObject');
               if (fo) { fo.setAttribute('x', midX - 84); fo.setAttribute('y', midY - 30); }
             }
@@ -2253,7 +2314,7 @@ export default function Canvas({
         if (p && onPlaceObjectRef.current) {
           // Default sizes for a plain click (no real drag).
           const DEF = {
-            node:   { w: 60, h: 40 },
+            node:   { w: NEW_NODE_W, h: NEW_NODE_H },
             region: { w: 300, h: 200 },
             figure: (figureShapeRef.current === 'rect' || figureShapeRef.current === 'ellipse') ? { w: 200, h: 120 } : { w: 140, h: 140 },
           };
@@ -2404,8 +2465,8 @@ export default function Canvas({
                 const toAnchor = Math.abs(dx) > Math.abs(dy)
                   ? (dx > 0 ? 'left' : 'right')
                   : (dy > 0 ? 'top' : 'bottom');
-                const NEW_W = 220;
-                const NEW_H = 60;
+                const NEW_W = NEW_NODE_W;
+                const NEW_H = NEW_NODE_H;
                 let nx, ny;
                 if (toAnchor === 'left')        { nx = prev.cursorX;             ny = prev.cursorY - NEW_H / 2; }
                 else if (toAnchor === 'right')  { nx = prev.cursorX - NEW_W;     ny = prev.cursorY - NEW_H / 2; }
@@ -2454,7 +2515,7 @@ export default function Canvas({
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
     const world = screenToWorld(mx, my);
-    onAddNode(snap(world.x - 110), snap(world.y - 30));
+    onAddNode(snap(world.x - NEW_NODE_W / 2), snap(world.y - NEW_NODE_H / 2));
   }, [screenToWorld, onAddNode]);
 
   /* ================================================================
@@ -2503,6 +2564,19 @@ export default function Canvas({
   // point instead of only downward. Cleared on blur.
   const growthCenterRef = useRef({});
   useEffect(() => { editingRef.current = editingNodeId; }, [editingNodeId]);
+
+  // Live LaTeX preview while editing: a small panel under the node that
+  // re-renders the text on every keystroke (only when there is any $…$).
+  const [editPreview, setEditPreview] = useState(null); // { nodeId, html } | null
+  const updateEditPreview = useCallback((nodeId, text) => {
+    setEditPreview(text && text.includes('$') ? { nodeId, html: renderRichToHtml(text) } : null);
+  }, []);
+  useEffect(() => {
+    if (!editingNodeId) { setEditPreview(null); return; }
+    const n = nodes[editingNodeId];
+    updateEditPreview(editingNodeId, n ? n.text : '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingNodeId]);
 
   // When edit mode is entered (via Tab from App), focus the editable text
   // span and place the caret at the end so the very next keystroke types
@@ -2556,6 +2630,20 @@ export default function Canvas({
   }, [onUpdateNode, onNodeDragEnd]);
 
   const onTextKeyDown = useCallback((e, nodeId) => {
+    // ⌃ + key → insert a LaTeX connective at the caret (edit mode only).
+    // Control (not ⌘) because every one of these is free of OS/browser bindings.
+    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      const SNIPPETS = {
+        Digit7: '$\\wedge$', Digit8: '$\\vee$', Digit9: '$\\subset$', Digit0: '$\\supset$',
+        Period: '$\\Rightarrow$', Comma: '$\\Leftarrow$', Equal: '$\\equiv$', Backquote: '$\\sim$',
+      };
+      const snippet = SNIPPETS[e.code];
+      if (snippet) {
+        e.preventDefault(); e.stopPropagation();
+        document.execCommand('insertText', false, snippet); // fires `input` → fit/preview update
+        return;
+      }
+    }
     if (e.key === 'Escape') {
       e.target.innerText = nodes[nodeId]?.text || '';
       setEditingNodeId(null);
@@ -2704,22 +2792,20 @@ export default function Canvas({
       const from = resolvePos(a, 'from');
       const to   = resolvePos(a, 'to');
       if (!from || !to) continue;
-      const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } = bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, a.fromCtrl, a.toCtrl);
+      const { path, cp1x, cp1y, cp2x, cp2y, midX, midY, midAngle } = bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, a.fromCtrl, a.toCtrl);
       const g = arrowGsRef.current[aId];
       if (!g) continue;
       const paths = g.querySelectorAll(':scope > path');
-      for (const p of paths) p.setAttribute('d', path);
+      const dPath = headedPath({ path }, arrowsModeOf(a, a.kind ? EDGE_KINDS[a.kind] : null), ahSize);
+      for (const p of paths) p.setAttribute('d', dPath);
       const polygons = g.querySelectorAll('polygon.arrow-marker');
       if (polygons.length >= 1) polygons[0].setAttribute('points', arrowheadPoints(to.x, to.y, cp2x, cp2y, ahSize));
       if (polygons.length >= 2) polygons[1].setAttribute('points', arrowheadPoints(from.x, from.y, cp1x, cp1y, ahSize));
       const aKindDef2 = a.kind ? EDGE_KINDS[a.kind] : null;
       let mt2 = `translate(${midX} ${midY})`;
-      if (aKindDef2 && aKindDef2.rotateWithFlow) {
-        const ang = Math.atan2(cp2y - cp1y, cp2x - cp1x) * 180 / Math.PI;
-        mt2 += ` rotate(${ang})`;
-      }
+      if (aKindDef2 && aKindDef2.rotateWithFlow) mt2 += ` rotate(${snapAngle(midAngle)})`;
       const midGroups = g.querySelectorAll(':scope > g');
-      for (const mg of midGroups) mg.setAttribute('transform', mt2);
+      for (const mg of midGroups) mg.setAttribute('transform', mg.classList.contains('arrow-not') ? `translate(${midX} ${midY})` : mt2);
       const fo = g.querySelector(':scope > foreignObject');
       if (fo) {
         fo.setAttribute('x', midX - 84);
@@ -2898,7 +2984,7 @@ export default function Canvas({
     const kindDef = arrow.kind ? EDGE_KINDS[arrow.kind] : null;
     // Geometry: bezier curve (default) or an orthogonal "elbow" connector.
     const isElbow = arrow.line === 'elbow' || arrow.line === 'straight';
-    const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } = isElbow
+    const { path, cp1x, cp1y, cp2x, cp2y, midX, midY, midAngle } = isElbow
       ? elbowPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor)
       : bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, arrow.fromCtrl, arrow.toCtrl);
     // Kind dictates color when set; otherwise fall back to user color.
@@ -2912,9 +2998,8 @@ export default function Canvas({
     // everything else the user picks via `arrow.direction`
     // (forward / reverse / both / none), with legacy `bidirectional` honored.
     const dirLocked = kindDef && kindDef.render === 'text';
-    const arrowsMode = dirLocked
-      ? (kindDef.arrows || 'forward')
-      : (arrow.direction || (arrow.bidirectional ? 'both' : (kindDef ? (kindDef.arrows || 'forward') : 'forward')));
+    const arrowsMode = arrowsModeOf(arrow, kindDef);
+    const shownPath = isElbow ? path : headedPath({ path }, arrowsMode, arrowSize);
     // Dash style: 0/undefined solid, 1 small dashes, 2 large dashes.
     const dashArr = arrow.dash === 1 ? '7 5' : arrow.dash === 2 ? '14 9' : null;
     // Operator pill — single symbol (∧ / ∨ / ⇒ / ⇔).
@@ -2923,9 +3008,10 @@ export default function Canvas({
     const pillH = PILL_TEXT_HALF_H * 2;
     // Rotate directional glyphs (⇒ ⇔ ⊢ ⇀ ≡) along the bezier tangent at
     // the midpoint, so a vertical curve gets the symbol turned 90°.
-    const midAngleDeg = (kindDef && kindDef.rotateWithFlow)
-      ? Math.atan2(cp2y - cp1y, cp2x - cp1x) * 180 / Math.PI
-      : 0;
+    const midAngleDeg = (kindDef && kindDef.rotateWithFlow) ? snapAngle(midAngle) : 0;
+    // ¬ strip geometry (operators only): local side facing screen-left.
+    const notS = arrow.negated && kindDef && kindDef.render === 'text' ? notSideFor(midAngleDeg) : null;
+    const notExt = { l: notS && notS.lx < 0 ? NOT_STRIP : 0, r: notS && notS.lx > 0 ? NOT_STRIP : 0, t: notS && notS.ly < 0 ? NOT_STRIP : 0, b: notS && notS.ly > 0 ? NOT_STRIP : 0 };
     const midTransform = midAngleDeg
       ? `translate(${midX} ${midY}) rotate(${midAngleDeg})`
       : `translate(${midX} ${midY})`;
@@ -2972,14 +3058,14 @@ export default function Canvas({
           />
         ))}
         <path
-          d={path}
+          d={shownPath}
           className="arrow-path-hit"
           fill="none"
           onClick={(e) => onArrowClick(e, aId)}
           onDoubleClick={(e) => onArrowDoubleClick(e, aId)}
         />
         <path
-          d={path}
+          d={shownPath}
           className={`arrow-path${isSelected || isInSelection ? ' selected' : ''}`}
           stroke={color}
           strokeDasharray={dashArr || undefined}
@@ -3010,12 +3096,17 @@ export default function Canvas({
             onClick={(e) => onArrowClick(e, aId)}
             onDoubleClick={(e) => onArrowDoubleClick(e, aId)}
           >
+            {/* Body — one grid cell larger on the ¬ side when negated, so it is one outline. */}
             <rect
-              x={-pillW / 2} y={-pillH / 2}
-              width={pillW} height={pillH}
+              x={-pillW / 2 - notExt.l} y={-pillH / 2 - notExt.t}
+              width={pillW + notExt.l + notExt.r} height={pillH + notExt.t + notExt.b}
               rx={pillH / 2} ry={pillH / 2}
               fill="#0e0e10" stroke={color} strokeWidth={1.6}
             />
+            {notS && (
+              /* ¬( … ): the extra cell, outlined in red; the closing edge is the divider. */
+              <path d={notStripPath(notS, pillW / 2, pillH / 2)} fill="none" stroke="#ff6b6b" strokeWidth={1.6} pointerEvents="none" />
+            )}
             {kindDef.icon ? (
               <path d={kindDef.icon} transform="scale(0.85)" fill="none" stroke={color} strokeWidth={1.8}
                 strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
@@ -3047,6 +3138,13 @@ export default function Canvas({
               onMouseDown={(e) => onPillAnchorMouseDown(e, aId, 'bottom')} />
             <circle className="pill-anchor left"   cx={-pillW / 2} cy={0}         r={4.5} fill={color}
               onMouseDown={(e) => onPillAnchorMouseDown(e, aId, 'left')} />
+          </g>
+        )}
+        {notS && (
+          /* The "~" stays upright, astride the divider on the pill's screen-left. */
+          <g className="arrow-not" transform={`translate(${midX} ${midY})`} pointerEvents="none">
+            <text x={-(midAngleDeg % 180 === 0 ? pillW / 2 : pillH / 2) - NOT_STRIP / 2} y={1} textAnchor="middle" dominantBaseline="middle" fill="#ff6b6b"
+              style={{ font: '400 18px ui-sans-serif, system-ui, sans-serif' }}>~</text>
           </g>
         )}
         {kindDef && kindDef.render === 'glyph' && (
@@ -3497,9 +3595,11 @@ export default function Canvas({
     const isFigure = !!node.shape;
 
     const nodeStyle = {
-      left: node.x,
+      // A negated node is one grid cell wider to the left: the red ¬ strip.
+      left: node.x - (node.negated && node.style !== 'text' ? NOT_STRIP : 0),
       top: node.y,
-      width: node.width || 220,
+      width: (node.width || 220) + (node.negated && node.style !== 'text' ? NOT_STRIP : 0),
+      paddingLeft: node.negated && node.style !== 'text' ? NOT_STRIP + 10 : undefined,
       minHeight: node.style === 'text' ? 20 : height,
       borderColor: (isSelected || isInSelection) ? color : ((node.style === 'text' || isFigure) ? 'transparent' : color),
       // Selection = a real highlight: a bright accent halo around the whole
@@ -3562,7 +3662,9 @@ export default function Canvas({
         )}
         {/* NOT modifier — top-right corner. Negation of this node's claim. */}
         {node.negated && (
-          <div className="node-not-badge" title="Negated (NOT)">~</div>
+          <div className="node-not-strip" title="Negated (NOT)">
+            <span className="node-not-mark">~</span>
+          </div>
         )}
         {/* Probability — editable percentage in top-right corner. Sits left of
             the NOT badge when both are enabled. */}
@@ -3615,6 +3717,7 @@ export default function Canvas({
             onBlur={(e) => onTextBlur(e, node.id)}
             onKeyDown={(e) => onTextKeyDown(e, node.id)}
             onInput={(e) => {
+              updateEditPreview(node.id, e.target.innerText);
               const el = e.target.closest('.wb-node');
               if (el) {
                 // fitWidth: widen to the longest unwrapped line (padding included),
@@ -3626,7 +3729,12 @@ export default function Canvas({
                   span.style.whiteSpace = 'pre';
                   const cs = getComputedStyle(el);
                   const extra = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth);
-                  fitted = Math.min(MAX_FIT_WIDTH, Math.max(MIN_FIT_WIDTH, Math.ceil((span.scrollWidth + extra) / GRID_SIZE) * GRID_SIZE));
+                  // Measure the glyphs, not the span's box: the box is as wide as the
+                  // node, so it would ratchet — grow on typing, never shrink on delete.
+                  const range = document.createRange();
+                  range.selectNodeContents(span);
+                  const textW = range.getBoundingClientRect().width / (vpRef.current.zoom || 1);
+                  fitted = Math.min(MAX_FIT_WIDTH, Math.max(MIN_FIT_WIDTH, Math.ceil((textW + extra) / GRID_SIZE) * GRID_SIZE));
                   span.style.whiteSpace = prevWs;
                   if (fitted !== (node.width || 220)) el.style.width = fitted + 'px';
                 }
@@ -3760,6 +3868,14 @@ export default function Canvas({
 
         <div className="node-layer">
           {nodeElements}
+          {editPreview && nodes[editPreview.nodeId] && (() => {
+            const n = nodes[editPreview.nodeId];
+            const h = n.height || nodeHeightMap[n.id] || 60;
+            return (
+              <div className="edit-preview" style={{ left: n.x, top: n.y + h + 10, minWidth: Math.max(120, n.width || 220) }}
+                dangerouslySetInnerHTML={{ __html: editPreview.html }} />
+            );
+          })()}
         </div>
 
         {/* Placement preview (Node / Region / Figure tools) */}

@@ -22,6 +22,11 @@ import {
   arrowheadPoints,
   getPillBounds,
   resolveEndpoint,
+  headedPath,
+  NOT_STRIP,
+  snapAngle,
+  notSideFor,
+  notStripPath,
 } from './Canvas.jsx';
 import { NODE_KINDS, EDGE_KINDS, NODE_STATUSES, FONT_FAMILIES } from './argTypes.js';
 
@@ -299,10 +304,18 @@ function renderNode(n, theme) {
   } else if (n.style !== 'text') {
     const border = kindDef ? kindDef.accent : (n.color || theme.nodeBorder);
     const fill   = kindDef ? kindDef.bg     : theme.nodeBg;
+    const nx = n.negated ? n.x - NOT_STRIP : n.x, nw = n.negated ? w + NOT_STRIP : w;
     parts.push(
-      `<rect x="${n.x}" y="${n.y}" width="${w}" height="${h}" rx="20" ry="20" ` +
+      `<rect x="${nx}" y="${n.y}" width="${nw}" height="${h}" rx="20" ry="20" ` +
         `fill="${fill}" stroke="${border}" stroke-width="1.5"/>`
     );
+    if (n.negated) {
+      // the ¬ cell: red outline (closing edge = divider) and a red "~" astride it
+      parts.push(
+        `<path d="M ${n.x} ${n.y} H ${nx + 20} A 20 20 0 0 0 ${nx + 20} ${n.y + h} H ${n.x} Z" fill="none" stroke="#ff6b6b" stroke-width="1.5"/>` +
+        `<text x="${n.x - NOT_STRIP / 2}" y="${n.y + h / 2 + 6}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="20" fill="#ff6b6b">~</text>`
+      );
+    }
   }
 
   // Text content — first split on explicit `\n`, then word-wrap each
@@ -331,7 +344,7 @@ function renderNode(n, theme) {
       ? n.y + h - totalH - padV
       : n.y + h / 2 - totalH / 2) + lineH * 0.75;
   const tspans = wrappedLines.map((ln, i) =>
-    `<tspan x="${n.x + w / 2}" y="${startY + i * lineH}">${esc(ln)}</tspan>`
+    `<tspan x="${n.x + w / 2 + (n.negated ? 5 : 0)}" y="${startY + i * lineH}">${esc(ln)}</tspan>`
   ).join('');
   // Text nodes colour their text with the node color.
   const textFill = n.style === 'text' ? (n.color || theme.text) : theme.text;
@@ -354,17 +367,6 @@ function renderNode(n, theme) {
     );
   }
 
-  // Negation — "~" tab on the middle of the left side
-  if (n.negated) {
-    const cx = n.x;
-    const cy = n.y + h / 2;
-    parts.push(
-      `<circle cx="${cx}" cy="${cy}" r="11" fill="${theme.negBadgeBg}"/>` +
-      `<text x="${cx}" y="${cy + 5}" text-anchor="middle" ` +
-        `font-family="system-ui, sans-serif" font-size="16" font-weight="900" ` +
-        `fill="${theme.negBadgeTxt}">~</text>`
-    );
-  }
 
   // Probability pill (top-right; offset left when negation also present)
   if (n.probability != null) {
@@ -393,11 +395,12 @@ function renderArrow(arrow, state, theme) {
   const to   = resolveEndpoint(arrow, 'to',   state.nodes, state.arrows, {}, EDGE_KINDS, state.regions || {});
   if (!from || !to) return '';
 
-  const { path, cp1x, cp1y, cp2x, cp2y, midX, midY } = (arrow.line === 'elbow' || arrow.line === 'straight')
+  const { path, cp1x, cp1y, cp2x, cp2y, midX, midY, midAngle } = (arrow.line === 'elbow' || arrow.line === 'straight')
     ? elbowPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor)
     : bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, arrow.fromCtrl, arrow.toCtrl);
   const kindDef = arrow.kind ? EDGE_KINDS[arrow.kind] : null;
   const color = kindDef ? kindDef.stroke : (arrow.color || theme.defaultArrow);
+  const isElbow = arrow.line === 'elbow' || arrow.line === 'straight';
   const strokeWidth = 1.5;
   const dirLocked = kindDef && kindDef.render === 'text';
   const arrowsMode = dirLocked
@@ -436,7 +439,7 @@ function renderArrow(arrow, state, theme) {
     }
   }
   parts.push(
-    `<path d="${path}" fill="none" stroke="${color}" stroke-width="${strokeWidth}" stroke-linecap="round"${dashAttr}/>`
+    `<path d="${isElbow ? path : headedPath({ path }, arrowsMode, 12)}" fill="none" stroke="${color}" stroke-width="${strokeWidth}" stroke-linecap="round"${dashAttr}/>`
   );
 
   if (arrowsMode === 'forward' || arrowsMode === 'both') {
@@ -452,9 +455,7 @@ function renderArrow(arrow, state, theme) {
 
   // Midpoint marker — rotate with curve tangent when the kind opts in
   // (consequently / equivalently / presupposes / necessaryFor / identical).
-  const midAng = (kindDef && kindDef.rotateWithFlow)
-    ? Math.atan2(cp2y - cp1y, cp2x - cp1x) * 180 / Math.PI
-    : 0;
+  const midAng = (kindDef && kindDef.rotateWithFlow) ? snapAngle(midAngle) : 0;
   const midXform = midAng
     ? `translate(${midX} ${midY}) rotate(${midAng})`
     : `translate(${midX} ${midY})`;
@@ -494,12 +495,16 @@ function renderArrow(arrow, state, theme) {
         `<line x1="0" y1="-9" x2="0" y2="9" stroke="${color}" stroke-width="2"/>`
       : `<text x="0" y="1" text-anchor="middle" dominant-baseline="middle" fill="${color}" ` +
           `font-family="system-ui, sans-serif" font-size="19" font-weight="700">${esc(kindDef.symbol)}</text>`;
+    const S = arrow.negated ? notSideFor(midAng) : null;
+    const ext = { l: S && S.lx < 0 ? NOT_STRIP : 0, r: S && S.lx > 0 ? NOT_STRIP : 0, t: S && S.ly < 0 ? NOT_STRIP : 0, b: S && S.ly > 0 ? NOT_STRIP : 0 };
+    const notTab = S ? `<path d="${notStripPath(S, pw / 2, ph / 2)}" fill="none" stroke="#ff6b6b" stroke-width="1.6"/>` : '';
     parts.push(
       `<g transform="${midXform}">` +
-        `<rect x="${-pw / 2}" y="${-ph / 2}" width="${pw}" height="${ph}" ` +
+        `<rect x="${-pw / 2 - ext.l}" y="${-ph / 2 - ext.t}" width="${pw + ext.l + ext.r}" height="${ph + ext.t + ext.b}" ` +
           `rx="${ph / 2}" ry="${ph / 2}" fill="${theme.pillBg}" stroke="${color}" stroke-width="1.8"/>` +
-        glyph +
-      `</g>`
+        notTab + glyph +
+      `</g>` +
+      (S ? `<text x="${midX - (midAng % 180 === 0 ? pw / 2 : ph / 2) - NOT_STRIP / 2}" y="${midY + 6}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="18" fill="#ff6b6b">~</text>` : '')
     );
   }
 

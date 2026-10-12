@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import Canvas from './Canvas.jsx';
+import Canvas, { NEW_NODE_W, NEW_NODE_H } from './Canvas.jsx';
 import { NODE_KINDS, NODE_KIND_ORDER, EDGE_KINDS, EDGE_KIND_ORDER, NODE_STATUSES, NODE_STATUS_ROWS, FONT_FAMILY_ORDER, FONT_FAMILY_LABEL, DEFAULT_FONT_SIZE } from './argTypes.js';
 
 // Arrow kinds that fold n-ary participants instead of nesting another pill.
@@ -58,6 +58,7 @@ const COLOR_HK = {
 import { jsPDF } from 'jspdf';
 import { buildExportSvg, svgToCanvas } from './exportSvg.js';
 import { buildGraphFromDsl } from './dslImport.js';
+import { serializeToDsl } from './dslExport.js';
 
 /* ================================================================
    Mobile detection hook
@@ -75,8 +76,8 @@ function useMobile() {
 /* ================================================================
    Constants
    ================================================================ */
-// Fresh node: 3×2 grid cells; fits its text up to 15 cells wide.
-const NEW_W = 60, NEW_H = 40;
+// Fresh node size lives in Canvas.jsx (NEW_NODE_W/H) so every spawn path agrees.
+const NEW_W = NEW_NODE_W, NEW_H = NEW_NODE_H;
 const SAVE_DEBOUNCE = 500;
 const MAX_HISTORY = 50;
 // Multi-selection: object type → the Set key in `selection`.
@@ -2034,7 +2035,8 @@ export default function Board({
       const sid = selectedIdRef.current;
       const stype = selectedTypeRef.current;
 
-      // Cmd+Shift+1 = ! → toggle NOT; Cmd+Shift+5 = % → toggle probability.
+      // Cmd+Shift+1 = ! → toggle NOT (node, or an operator pill = ¬( … ));
+      // Cmd+Shift+5 = % → toggle probability.
       if (cmd && (e.code === 'Digit1' || e.code === 'Digit5')) {
         if (stype === 'node' && sid) {
           const n = stateRef.current.nodes[sid];
@@ -2042,6 +2044,12 @@ export default function Board({
             e.preventDefault(); e.stopPropagation();
             if (e.code === 'Digit1') onUpdateNodeRef.current(sid, { negated: !n.negated });
             else onUpdateNodeRef.current(sid, { probability: n.probability != null ? null : 50 });
+          }
+        } else if (stype === 'arrow' && sid && e.code === 'Digit1') {
+          const a = stateRef.current.arrows[sid];
+          if (a && a.kind && EDGE_KINDS[a.kind] && EDGE_KINDS[a.kind].render === 'text') {
+            e.preventDefault(); e.stopPropagation();
+            onUpdateArrowRef.current?.(sid, { negated: !a.negated });
           }
         }
         return;
@@ -2173,6 +2181,19 @@ export default function Board({
         e.preventDefault(); e.stopPropagation();
         setPropsOpen((v) => !v);
         return;
+      }
+
+      // T / V on a selected node → text / vertical alignment, cycling only the
+      // two used settings: centre ⇄ left, centre ⇄ top.
+      if (!cmd && !e.shiftKey && (e.code === 'KeyT' || e.code === 'KeyV')) {
+        const sid = selectedIdRef.current;
+        const n = sid && selectedTypeRef.current === 'node' ? stateRef.current.nodes[sid] : null;
+        if (n) {
+          e.preventDefault(); e.stopPropagation();
+          if (e.code === 'KeyT') onUpdateNodeRef.current(sid, { align: n.align === 'center' ? 'left' : 'center' });
+          else onUpdateNodeRef.current(sid, { valign: n.valign === 'center' ? 'top' : 'center' });
+          return;
+        }
       }
 
       // N → new node at the viewport centre, ready to type.
@@ -2487,6 +2508,24 @@ export default function Board({
     onUpdateViewport({ panX, panY, zoom });
   }, [nodes, onUpdateViewport]);
 
+  // Board → DSL on the clipboard (the whole board, or the selection if any).
+  const copyDsl = useCallback(() => {
+    const st = stateRef.current;
+    const selIds = selection.nodeIds.size ? selection.nodeIds : (selectedType === 'node' && selectedId ? new Set([selectedId]) : null);
+    let sub = { nodes: st.nodes, arrows: st.arrows, regions: st.regions || {} };
+    if (selIds) {
+      const nodes = Object.fromEntries(Object.entries(st.nodes).filter(([id]) => selIds.has(id)));
+      const keep = (a) => (!a.fromNodeId || nodes[a.fromNodeId]) && (!a.toNodeId || nodes[a.toNodeId]) && !a.fromRegionId && !a.toRegionId;
+      const arrows = Object.fromEntries(Object.entries(st.arrows).filter(([, a]) => keep(a)));
+      sub = { nodes, arrows, regions: {} };
+    }
+    const { text } = serializeToDsl(sub);
+    navigator.clipboard?.writeText(text);
+  }, [selection, selectedId, selectedType]);
+
+  const copyDslRef = useRef(copyDsl);
+  useEffect(() => { copyDslRef.current = copyDsl; }, [copyDsl]);
+
   // DSL → graph. Lays out the parsed graph with dagre and merges it into the
   // current board (placed to the right of existing content), then fits view.
   // Returns { count, errors }.
@@ -2538,6 +2577,10 @@ export default function Board({
       if (ae && (ae.isContentEditable || ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
 
       // `?` (Shift+/) toggles the shortcuts overlay.
+      // ⌘⇧U — import from text; ⌘⇧X — copy board (or selection) as text.
+      // (⌘⇧I / ⌘⇧C are Chrome's DevTools shortcuts, so not those.)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === 'KeyU') { e.preventDefault(); setDslOpen(true); return; }
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === 'KeyX') { e.preventDefault(); copyDslRef.current(); return; }
       if (e.key === '?') {
         e.preventDefault();
         setShowShortcuts((v) => !v);
@@ -2916,6 +2959,19 @@ export default function Board({
         </button>
 
         <div className="toolbar-divider" />
+        {/* Text ⇄ board: the DSL is the board as text (and what an AI reads/writes). */}
+        <button className="toolbar-btn" onClick={() => setDslOpen(true)} title="Import from text (DSL) — ⌘⇧U">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M3 3.5h10M3 6.5h6M3 9.5h8M3 12.5h5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            <path d="M11.5 9.5v4M9.5 11.5h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+        </button>
+        <button className="toolbar-btn" onClick={copyDsl} title="Copy board as text (DSL) — ⌘⇧X">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <rect x="5" y="5" width="8" height="8.5" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M3 10.5V3.5A1 1 0 0 1 4 2.5h6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+        </button>
         <button
           className={`toolbar-btn${sourceMode ? ' tool-active' : ''}`}
           onClick={toggleSourceMode}
@@ -3306,6 +3362,20 @@ export default function Board({
               </div>
             )}
 
+            {/* Operator pill: negate the whole sub-formula; linear formula */}
+            {isArrow && arrowKindDef && arrowKindDef.render === 'text' && (
+              <div className="props-group">
+                <span className="props-label">Sub-formula</span>
+                <div className="props-row">
+                  <button
+                    className={`props-btn${sel.negated ? ' active' : ''}`}
+                    onClick={() => onUpdateArrow(selectedId, { negated: !sel.negated })}
+                    title="Negate this sub-formula: ¬( … )  (⌘⇧1)"
+                  >¬ NOT</button>
+                </div>
+              </div>
+            )}
+
             {/* Arrow: direction */}
             {isArrow && (
               <div className="props-group">
@@ -3517,6 +3587,12 @@ const SHORTCUT_SECTIONS = [
     ['⌘/Ctrl + Z', 'undo'],
     ['⌘/Ctrl + Shift + Z', 'redo'],
     ['Delete / Backspace', 'delete selection'],
+    ['T / V', 'text align centre ⇄ left / vertical align centre ⇄ top'],
+    ['⌃7 ⌃8 ⌃9 ⌃0', 'in edit: insert $\\wedge$ $\\vee$ $\\subset$ $\\supset$'],
+    ['⌃. ⌃, ⌃= ⌃`', 'in edit: insert $\\Rightarrow$ $\\Leftarrow$ $\\equiv$ $\\sim$'],
+    ['⌘⇧1', 'negate node or operator pill (¬)'],
+    ['⌘⇧U', 'import from text (DSL)'],
+    ['⌘⇧X', 'copy board / selection as text (DSL)'],
     ['?', 'toggle this sheet'],
   ]},
 ];
@@ -3539,7 +3615,7 @@ function DslModal({ onClose, onImport }) {
   const run = () => setResult(onImport(text || DSL_EXAMPLE));
   return (
     <div className="shortcuts-overlay" onClick={onClose}>
-      <div className="dsl-card" onClick={(e) => e.stopPropagation()}>
+      <div className="dsl-card" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } }}>
         <div className="shortcuts-head">
           <span>Import from text — DSL → graph</span>
           <button className="shortcuts-close" onClick={onClose} title="Close (Esc)">✕</button>

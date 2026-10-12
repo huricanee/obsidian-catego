@@ -58,8 +58,11 @@ export function buildGraphFromDsl(text, genId, origin = { x: 0, y: 0 }) {
   const isPlaced = (n) => !!n.shape || (n.x != null && n.y != null);
   const flow = parsed.nodes.filter((n) => !isPlaced(n));
 
+  // Formulas read left→right (P, Q → ∧ → ⇒ → R), arguments top→down.
+  const opById = Object.fromEntries(parsed.edges.filter((e) => e.operator && e.id).map((e) => [e.id, e]));
+  const hasOps = Object.keys(opById).length > 0;
   const g = new dagre.graphlib.Graph();
-  g.setGraph({ rankdir: 'TB', nodesep: 50, ranksep: 80, marginx: 20, marginy: 20 });
+  g.setGraph({ rankdir: hasOps ? 'LR' : 'TB', nodesep: 50, ranksep: hasOps ? 100 : 80, marginx: 20, marginy: 20 });
   g.setDefaultEdgeLabel(() => ({}));
 
   const sizes = {};
@@ -68,11 +71,16 @@ export function buildGraphFromDsl(text, genId, origin = { x: 0, y: 0 }) {
     sizes[n.id] = s;
     g.setNode(n.id, { width: s.w, height: s.h });
   }
+  // Operators take part in the layout as pseudo-nodes (a pill's footprint), so
+  // a chain like `and(p,q)` → `implies(pq, r)` gets its own rank per operator
+  // instead of all its pills piling up between two nodes.
+  const inLayout = (id) => sizes[id] || opById[id];
+  for (const id of Object.keys(opById)) g.setNode(id, { width: 44, height: 34 });
   for (const e of parsed.edges) {
-    if (sizes[e.from] && sizes[e.to]) g.setEdge(e.from, e.to);
-    // n-ary operator members: connect so they cluster in the layout.
-    for (const p of (e.participants || [])) {
-      if (sizes[e.from] && sizes[p]) g.setEdge(e.from, p);
+    if (e.operator && e.id) {
+      for (const m of [e.from, e.to, ...(e.participants || [])]) if (inLayout(m) && m !== e.id) g.setEdge(m, e.id);
+    } else if (inLayout(e.from) && inLayout(e.to) && e.from !== e.to) {
+      g.setEdge(e.from, e.to);
     }
   }
   dagre.layout(g);
@@ -112,27 +120,46 @@ export function buildGraphFromDsl(text, genId, origin = { x: 0, y: 0 }) {
     nodes.push(node);
   }
 
-  // Resolve a DSL endpoint id to { region: bool, cid } — node or declared region.
-  const resolve = (id) => idMap[id] ? { region: false, cid: idMap[id] }
-    : regionRef[id] ? { region: true, cid: regionRef[id] } : null;
+  // Operator pills get their arrow ids up front, so an operator may reference
+  // another operator (nesting = parentheses) whatever the line order.
+  const opCid = {};
+  for (const e of parsed.edges) if (e.operator && e.id) opCid[e.id] = genId('a');
+  // Resolve a DSL endpoint id → { kind: 'node' | 'region' | 'pill', cid }.
+  const resolve = (id) => idMap[id] ? { kind: 'node', cid: idMap[id] }
+    : regionRef[id] ? { kind: 'region', cid: regionRef[id] }
+    : opCid[id] ? { kind: 'pill', cid: opCid[id] } : null;
+  // A pill sits at the midpoint of its operator's base endpoints.
+  const centreOf = (id, depth = 0) => {
+    if (centre[id]) return centre[id];
+    const op = opById[id];
+    if (!op || depth > 8) return null;
+    const a = centreOf(op.from, depth + 1), b = centreOf(op.to, depth + 1);
+    return a && b ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } : null;
+  };
 
   // Build Catego arrows.
   const arrows = [];
   for (const e of parsed.edges) {
     const rf = resolve(e.from), rt = resolve(e.to);
     if (!rf || !rt) continue;
-    const a = anchorsFor(centre[e.from], centre[e.to]);
-    const id = genId('a');
+    const fc = centreOf(e.from), tc = centreOf(e.to);
+    let a = fc && tc ? anchorsFor(fc, tc) : { from: 'right', to: 'left' };
+    // An operator over two nodes of the same column (P over Q): leave both by
+    // the right side so the pill sits beside the column, where the next
+    // operator in the chain picks it up — not on the nodes' border.
+    if (e.operator && hasOps && fc && tc && Math.abs(fc.x - tc.x) < 1) a = { from: 'right', to: 'right' };
+    const id = e.operator && e.id ? opCid[e.id] : genId('a');
     const arrow = {
       id,
-      fromNodeId: rf.region ? null : rf.cid, fromAnchor: a.from,
-      toNodeId: rt.region ? null : rt.cid, toAnchor: a.to,
-      fromPillArrowId: null, toPillArrowId: null,
-      fromRegionId: rf.region ? rf.cid : null, toRegionId: rt.region ? rt.cid : null,
+      fromNodeId: rf.kind === 'node' ? rf.cid : null, fromAnchor: a.from,
+      toNodeId: rt.kind === 'node' ? rt.cid : null, toAnchor: a.to,
+      fromPillArrowId: rf.kind === 'pill' ? rf.cid : null, toPillArrowId: rt.kind === 'pill' ? rt.cid : null,
+      fromRegionId: rf.kind === 'region' ? rf.cid : null, toRegionId: rt.kind === 'region' ? rt.cid : null,
       fromPoint: null, toPoint: null,
       color: '#cf7bf0',
     };
     if (e.kind) arrow.kind = e.kind;
+    if (e.negated) arrow.negated = true;
     if (e.label) arrow.label = e.label;
     if (e.weight != null) arrow.probWeight = Math.min(100, e.weight);
     // Operators lock direction; only set an override for non-operator edges.
@@ -140,8 +167,8 @@ export function buildGraphFromDsl(text, genId, origin = { x: 0, y: 0 }) {
     // n-ary operator participants: extra endpoints folded into the pill.
     // Anchor each toward the pill centre (midpoint of the base from/to).
     const parts = (e.participants || []).filter((p) => idMap[p]);
-    if (parts.length) {
-      const pill = { x: (centre[e.from].x + centre[e.to].x) / 2, y: (centre[e.from].y + centre[e.to].y) / 2 };
+    if (parts.length && fc && tc) {
+      const pill = { x: (fc.x + tc.x) / 2, y: (fc.y + tc.y) / 2 };
       arrow.participants = parts.map((p) => ({
         nodeId: idMap[p],
         anchor: anchorsFor(centre[p], pill).from,

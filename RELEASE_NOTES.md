@@ -1,4 +1,5 @@
-- New nodes start small (3×2 grid cells) and grow with their text up to 15 cells, then wrap.
-- Slender arrows and smaller connective pills.
-- Negation is shown as a "~" tab on the node's left side.
-- Regions: drawn (not clicked) into existence, node-like rounded corners, outline-only by default (`fill` to tint), and no lock — the inside is inert, the region moves by its border.
+- Negation redesigned: the node or connective pill grows one cell to the left — a red-outlined cell with a "~" — and connective pills can be negated too (¬(P ∧ Q)); DSL `id = !and(a, b)`.
+- Nested sub-formulas (`b = implies(a, c)` where `a` is another operator) now round-trip through the text format.
+- Connective pills snap to quarter turns; arrows keep the pill side they were attached to; the stroke ends at the arrowhead's notch.
+- Edit mode: ⌃7 ⌃8 ⌃9 ⌃0 ⌃. ⌃, ⌃= ⌃` insert ∧ ∨ ⊂ ⊃ ⇒ ⇐ ≡ ∼ as LaTeX; a live LaTeX preview appears under the node while editing.
+- Dev mode: T / V toggle text / vertical alignment. New nodes are 3×2 cells and fit their text.
