@@ -532,24 +532,33 @@ export default function Board({
 
   // Isolate the board's keys from Obsidian's global hotkeys: while the pointer is
   // over the board (or a node is being edited), stop keydown/keyup from reaching
-  // Obsidian. All board handlers are window-capture (same target), so they still
-  // fire — only Obsidian (document-level) is blocked.
+  // Obsidian. Board-level hotkeys are window-capture listeners, so a stop at
+  // window-capture still lets them fire. But a key typed INTO a node (Enter,
+  // Escape, the ⌃ LaTeX snippets) is handled by React's onKeyDown, which lives
+  // on the React root container — below window. Those events are let through
+  // at window and stopped at the container instead, right after React ran.
   const overRef = useRef(false);
   useEffect(() => {
     if (!isolateKeys) return;
     const root = rootRef.current;
+    const container = root && root.parentElement; // the React root (Obsidian's view content)
     const onEnter = () => { overRef.current = true; };
     const onLeave = () => { overRef.current = false; };
     if (root) { root.addEventListener('mouseenter', onEnter); root.addEventListener('mouseleave', onLeave); }
+    const typingInBoard = (e) => !!(root && e.target && e.target.isContentEditable && root.contains(e.target));
     const stop = (e) => {
+      if (typingInBoard(e)) return; // React first; stopped at the container below
       if (overRef.current || (root && root.contains(document.activeElement))) e.stopPropagation();
     };
+    const stopAfterReact = (e) => { if (typingInBoard(e)) e.stopPropagation(); };
     window.addEventListener('keydown', stop, true);
     window.addEventListener('keyup', stop, true);
+    if (container) { container.addEventListener('keydown', stopAfterReact); container.addEventListener('keyup', stopAfterReact); }
     return () => {
       if (root) { root.removeEventListener('mouseenter', onEnter); root.removeEventListener('mouseleave', onLeave); }
       window.removeEventListener('keydown', stop, true);
       window.removeEventListener('keyup', stop, true);
+      if (container) { container.removeEventListener('keydown', stopAfterReact); container.removeEventListener('keyup', stopAfterReact); }
     };
   }, [isolateKeys]);
 
