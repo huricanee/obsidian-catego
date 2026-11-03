@@ -1,1 +1,1 @@
-- Fix: keys typed inside a node (Enter, Escape, the ⌃ LaTeX snippets ⌃7 ⌃8 ⌃9 ⌃0 ⌃. ⌃, ⌃= ⌃`) now reach the board inside Obsidian — the hotkey isolation used to swallow them before the board saw them.
+- Fix: a node whose width was set by hand (resize handles or ⌥A / ⌥D) keeps that width while you type; it no longer snaps back to the text-fitted width.

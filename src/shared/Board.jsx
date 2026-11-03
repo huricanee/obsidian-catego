@@ -2168,8 +2168,9 @@ export default function Board({
           const n = stateRef.current.nodes[sid];
           if (!n) return;
           const w = n.width || 220, h = n.height || 60;
-          if (e.code === 'KeyD') onUpdateNodeRef.current(sid, { width: w + step });
-          else if (e.code === 'KeyA') onUpdateNodeRef.current(sid, { width: Math.max(MIN_W, w - step) });
+          // A deliberate width is a manual size: stop fitting to text from now on.
+          if (e.code === 'KeyD') onUpdateNodeRef.current(sid, { width: w + step, fitWidth: false });
+          else if (e.code === 'KeyA') onUpdateNodeRef.current(sid, { width: Math.max(MIN_W, w - step), fitWidth: false });
           else if (e.code === 'KeyS') onUpdateNodeRef.current(sid, { height: h + step });
           else onUpdateNodeRef.current(sid, { height: Math.max(MIN_H, h - step) });
         } else {
