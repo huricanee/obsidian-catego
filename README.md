@@ -51,7 +51,8 @@ The essentials:
 | `Enter` | toggle command / edit mode (type into the selected node) |
 | `Tab` / `.` | tap: next node / next arrow |
 | `W` `A` `S` `D` | move the selected node |
-| `Cmd` + `WASD` | jump to the nearest **node** in that direction |
+| `Cmd` + `WASD` | jump to the nearest **node or arrow** in that direction |
+| `Cmd` + `F` | centre the view on the selected node / arrow |
 | `.` + `WASD` | jump to the nearest **arrow** in that direction |
 | `Option` + `WASD` | resize |
 | `I` `J` `K` `L` | pull an arrow out of the selected node |

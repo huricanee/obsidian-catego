@@ -1637,51 +1637,31 @@ export default function Board({
       }
       return null;
     }
-    function navigateDirectionalArrow(dir) {
-      const visible = getVisibleArrows();
-      if (visible.length === 0) return;
+    // Directional step to the nearest visible object. `types` picks the
+    // candidate pool: Cmd+WASD walks nodes AND arrows together, Tab+WASD
+    // nodes only, .+WASD arrows only.
+    function navigateDirectionalIn(dir, types) {
+      const cands = [];
+      if (types.includes('node')) {
+        for (const c of getVisibleNodes()) {
+          cands.push({ id: c.id, type: 'node', x: c.x + (c.width || 220) / 2, y: c.y + (c.height || 60) / 2 });
+        }
+      }
+      if (types.includes('arrow')) {
+        for (const v of getVisibleArrows()) cands.push({ id: v.id, type: 'arrow', x: v.x, y: v.y });
+      }
+      if (cands.length === 0) return;
       const origin = currentFocusPoint();
       if (!origin) {
-        setSelectedId(visible[0].id);
-        setSelectedType('arrow');
+        setSelectedId(cands[0].id);
+        setSelectedType(cands[0].type);
         return;
       }
-      // Skip the current object only when it's an arrow (same list).
-      const curId = (selectedTypeRef.current === 'arrow') ? selectedIdRef.current : null;
+      const curId = selectedIdRef.current, curType = selectedTypeRef.current;
       let best = null, bestScore = Infinity;
-      for (const v of visible) {
-        if (v.id === curId) continue;
-        const ddx = v.x - origin.x, ddy = v.y - origin.y;
-        let score;
-        if (dir === 'up')         { if (ddy >= 0) continue; score = -ddy + Math.abs(ddx) * 2; }
-        else if (dir === 'down')  { if (ddy <= 0) continue; score =  ddy + Math.abs(ddx) * 2; }
-        else if (dir === 'left')  { if (ddx >= 0) continue; score = -ddx + Math.abs(ddy) * 2; }
-        else                      { if (ddx <= 0) continue; score =  ddx + Math.abs(ddy) * 2; }
-        if (score < bestScore) { bestScore = score; best = v; }
-      }
-      if (best) {
-        setSelectedId(best.id);
-        setSelectedType('arrow');
-      }
-    }
-
-    function navigateDirectional(dir) {
-      const visible = getVisibleNodes();
-      if (visible.length === 0) return;
-      const origin = currentFocusPoint();
-      if (!origin) {
-        setSelectedId(visible[0].id);
-        setSelectedType('node');
-        return;
-      }
-      // Skip the current object only when it's a node (same list).
-      const curId = (selectedTypeRef.current === 'node') ? selectedIdRef.current : null;
-      let best = null, bestScore = Infinity;
-      for (const c of visible) {
-        if (c.id === curId) continue;
-        const ncx = c.x + (c.width || 220) / 2;
-        const ncy = c.y + (c.height || 60) / 2;
-        const ddx = ncx - origin.x, ddy = ncy - origin.y;
+      for (const c of cands) {
+        if (c.id === curId && c.type === curType) continue;
+        const ddx = c.x - origin.x, ddy = c.y - origin.y;
         let score;
         if (dir === 'up')         { if (ddy >= 0) continue; score = -ddy + Math.abs(ddx) * 2; }
         else if (dir === 'down')  { if (ddy <= 0) continue; score =  ddy + Math.abs(ddx) * 2; }
@@ -1691,8 +1671,26 @@ export default function Board({
       }
       if (best) {
         setSelectedId(best.id);
-        setSelectedType('node');
+        setSelectedType(best.type);
       }
+    }
+    const navigateDirectionalArrow = (dir) => navigateDirectionalIn(dir, ['arrow']);
+    const navigateDirectional = (dir) => navigateDirectionalIn(dir, ['node']);
+    const navigateDirectionalAny = (dir) => navigateDirectionalIn(dir, ['node', 'arrow']);
+
+    // Cmd+F — pan so the selected node / arrow / region sits at the centre.
+    function centerOnSelection() {
+      const p = currentFocusPoint();
+      if (!p) return false;
+      const api = kbNudgeApiRef.current;
+      if (api && typeof api.centerOn === 'function') {
+        api.centerOn(p.x, p.y);
+      } else {
+        const vp = viewportRef.current;
+        const update = onUpdateViewportRef.current;
+        if (update) update({ ...vp, panX: window.innerWidth / 2 - p.x * vp.zoom, panY: window.innerHeight / 2 - p.y * vp.zoom });
+      }
+      return true;
     }
 
     // WASD continuous nudge.  Cursor-move (during arrow drag) goes through
@@ -1828,6 +1826,11 @@ export default function Board({
         return;
       }
 
+      if (cmd && !e.altKey && e.code === 'KeyF') {
+        if (centerOnSelection()) { e.preventDefault(); e.stopPropagation(); }
+        return;
+      }
+
       const dir = dirOf(e);
       if (!dir) return;
       // Option+WASD is reserved for resize (handled in the dev-mode effect) —
@@ -1835,9 +1838,13 @@ export default function Board({
       if (e.altKey) return;
       e.preventDefault();
 
-      // Cmd+WASD (or Tab-held) → step to the neighbouring node
-      // (bare WASD moves the selected node).
-      if (cmd || tabHeldRef.current) {
+      // Cmd+WASD → step to the neighbouring node OR arrow, whichever is
+      // nearest; Tab-held → nodes only (bare WASD moves the selected node).
+      if (cmd) {
+        navigateDirectionalAny(dir);
+        return;
+      }
+      if (tabHeldRef.current) {
         tabConsumedRef.current = true;
         navigateDirectional(dir);
         return;
@@ -3566,14 +3573,17 @@ const SHORTCUT_SECTIONS = [
   ]},
   { title: 'Build & connect (dev)', rows: [
     ['I / J / K / L', 'new connected node up / left / down / right (→ edit)'],
-    ['W A S D', 'move selected node · with ⌥ Option: step to neighbour'],
+    ['W A S D', 'move selected node'],
+    ['⌘ + W A S D', 'jump to the nearest node or arrow in that direction'],
+    ['. + W A S D', 'jump to the nearest arrow'],
+    ['⌘ F', 'centre the view on the selected node / arrow'],
     ['← ↑ ↓ →', 'move selected node 1 cell (Shift = 5)'],
   ]},
   { title: 'Create & size (dev)', rows: [
     ['N', 'new node at centre → edit'],
     ['`', 'toggle properties panel'],
-    ['⌘ + W/S', 'node: bottom edge up / down'],
-    ['⌘ + A/D', 'node: right edge left / right'],
+    ['⌥ + W/S', 'node: bottom edge up / down'],
+    ['⌥ + A/D', 'node: right edge left / right'],
   ]},
   { title: 'Node type — Shift + key (dev)', rows: [
     ['D def · P postulate · U assumption · B belief', ''],

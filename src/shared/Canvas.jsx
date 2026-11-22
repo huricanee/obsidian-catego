@@ -2846,6 +2846,16 @@ export default function Canvas({
     onUpdateViewport({ ...vpRef.current });
   }, [onUpdateViewport]);
 
+  // Pan so world point (wx, wy) lands in the middle of the board element.
+  const kbCenterOn = useCallback((wx, wy) => {
+    const vp = vpRef.current;
+    const rect = rootRef.current?.getBoundingClientRect();
+    const w = rect?.width || window.innerWidth;
+    const h = rect?.height || window.innerHeight;
+    kbPan(w / 2 - (wx * vp.zoom + vp.panX), h / 2 - (wy * vp.zoom + vp.panY));
+    onUpdateViewport({ ...vpRef.current });
+  }, [kbPan, onUpdateViewport]);
+
   /* ---- Imperative zoom (keyboard +/-) — multiplies current zoom by
      `factor`, anchored on the screen centre. */
   const kbZoom = useCallback((factor) => {
@@ -2878,13 +2888,13 @@ export default function Canvas({
     if (!kbNudgeApiRef) return;
     kbNudgeApiRef.current = {
       nudge: kbNudgeNode, commit: kbCommitNode,
-      pan: kbPan, panCommit: kbPanCommit,
+      pan: kbPan, panCommit: kbPanCommit, centerOn: kbCenterOn,
       zoom: kbZoom, zoomCommit: kbZoomCommit,
     };
     return () => {
       if (kbNudgeApiRef) kbNudgeApiRef.current = {};
     };
-  }, [kbNudgeApiRef, kbNudgeNode, kbCommitNode, kbPan, kbPanCommit, kbZoom, kbZoomCommit]);
+  }, [kbNudgeApiRef, kbNudgeNode, kbCommitNode, kbPan, kbPanCommit, kbCenterOn, kbZoom, kbZoomCommit]);
 
   const measureAllNodes = useCallback(() => {
     const newMap = {};

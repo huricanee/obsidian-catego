@@ -1,1 +1,3 @@
-- Fix: a node whose width was set by hand (resize handles or ⌥A / ⌥D) keeps that width while you type; it no longer snaps back to the text-fitted width.
+- `Cmd` + `WASD` now jumps to the nearest node **or arrow** in that direction (`.` + `WASD` still walks arrows only).
+- New: `Cmd` + `F` centres the view on the selected node, arrow or region.
+- Shortcut sheet (`?`) updated; resize rows corrected to `Option` + `WASD`.
