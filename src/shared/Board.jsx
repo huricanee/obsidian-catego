@@ -56,10 +56,13 @@ const COLOR_HK = {
   '#f783ac': '9', '#ffffff': '0',
 };
 import { jsPDF } from 'jspdf';
-import { buildExportSvg, svgToCanvas } from './exportSvg.js';
+import { buildExportSvg, svgToCanvas, invertCanvas } from './exportSvg.js';
 import { buildGraphFromDsl } from './dslImport.js';
 import { serializeToDsl } from './dslExport.js';
-import { PAPERS, PAGE_BGS, makeDoc, normalizeDoc, docLayout as computeDocLayout, clampViewport, fitPageViewport, pageIndexAt, contentBounds } from './pages.js';
+import { PAPERS, PAGE_BGS, makeDoc, normalizeDoc, docLayout as computeDocLayout, clampViewport, fitPageViewport, pageIndexAt, contentBounds, insertPage, deletePage, movePage, duplicatePage, shiftBelow, sliceRect } from './pages.js';
+import { makePdfService } from './pdf.js';
+import { applyAgentOps } from './agentOps.js';
+import PagePanel from './PagePanel.jsx';
 
 // A touch screen is present (iPad, touch laptop): pen options collapse while
 // writing, finger gestures are live.
@@ -95,6 +98,37 @@ const PALETTE = [
   '#868e96', '#ff6b6b', '#ffa94d', '#ffd43b', '#69db7c',
   '#38d9a9', '#4dabf7', '#cf7bf0', '#f783ac', '#ffffff',
 ];
+
+// Three pens and three highlighters, each with its own colour / width /
+// opacity (as in a notebook app): picking a slot picks all three at once, and
+// changing a setting changes the slot in hand.
+const defaultPens = () => ({
+  pen: [
+    { color: '#ffffff', width: TOUCH ? 2 : 4, opacity: 100 },
+    { color: '#4dabf7', width: TOUCH ? 2 : 4, opacity: 100 },
+    { color: '#ff6b6b', width: TOUCH ? 2 : 4, opacity: 100 },
+  ],
+  highlighter: [
+    { color: '#ffd43b', width: 14, opacity: 35 },
+    { color: '#69db7c', width: 14, opacity: 35 },
+    { color: '#f783ac', width: 14, opacity: 35 },
+  ],
+});
+function loadPens(raw) {
+  const base = defaultPens();
+  try {
+    const j = JSON.parse(raw || 'null');
+    for (const kind of ['pen', 'highlighter']) {
+      if (!j || !Array.isArray(j[kind])) continue;
+      base[kind] = base[kind].map((d, i) => {
+        const v = j[kind][i];
+        return v && typeof v.color === 'string' && v.width > 0 ? { color: v.color, width: Number(v.width), opacity: Math.max(1, Math.min(100, Number(v.opacity) || 100)) } : d;
+      });
+    }
+  } catch { /* defaults */ }
+  return base;
+}
+const IMAGE_MAX_EMBED = 1600; // px — pictures kept inside the board (no asset store) are downscaled to this
 
 let nextId = 1;
 function genId(prefix = 'n') {
@@ -152,7 +186,16 @@ function takeSnapshot(state) {
     // each stroke — times 50 undo steps — is what made long pages crawl.
     strokes: state.strokes || [],
     regions: JSON.parse(JSON.stringify(state.regions || {})),
+    // Sheet backgrounds move with page operations, so they are part of undo.
+    bgs: (state.doc && state.doc.bgs) || null,
   };
+}
+const sameBgs = (a, b) => JSON.stringify(a || null) === JSON.stringify(b || null);
+function docWithBgs(doc, bgs) {
+  if (!doc || sameBgs(doc.bgs, bgs)) return doc;
+  const next = { ...doc };
+  if (bgs) next.bgs = bgs; else delete next.bgs;
+  return next;
 }
 
 function applySnapshot(state, snapshot) {
@@ -162,6 +205,7 @@ function applySnapshot(state, snapshot) {
     arrows: snapshot.arrows,
     strokes: snapshot.strokes,
     regions: snapshot.regions || {},
+    doc: 'bgs' in snapshot ? docWithBgs(state.doc, snapshot.bgs) : state.doc,
   };
 }
 
@@ -198,11 +242,17 @@ function useNoSync() {
                       preferences (panel open, theme, LaTeX source mode)
    defaultZoom        zoom of a fresh board and of "reset zoom" (0 / fit on empty board)
    onOpenNote / onRenameNoteFile / bridge — note-backed nodes (Obsidian)
+   assets             { save(blob, name) → Promise<src>, url(src) → Promise<url>,
+                      data(src) → Promise<ArrayBuffer> } — where pictures and PDFs
+                      live (vault files, IndexedDB…). Without it pictures are
+                      embedded in the board and PDFs can't be imported.
+   loadPdfJs          () → Promise<pdf.js library> — the host's PDF engine
+                      (both must keep the same identity for the board's lifetime)
    ================================================================ */
 export default function Board({
   initial = null, onPersist, useSyncHook = useNoSync, overlay = null,
   renderRegionExtras = null, isolateKeys = false, defaultZoom = 1, prefs: prefsProp = null,
-  onOpenNote, onRenameNoteFile, bridge,
+  onOpenNote, onRenameNoteFile, bridge, assets = null, loadPdfJs = null,
 }) {
   const isMobile = useMobile();
   const rootRef = useRef(null);
@@ -225,6 +275,8 @@ export default function Board({
   };
 
   const [state, setState] = useState(initialState);
+  const pdf = useMemo(() => makePdfService(loadPdfJs, assets), [loadPdfJs, assets]);
+  const pdfService = pdf; // (`pdf` is also the jsPDF document's name in the exporter)
   // Paged document: page rectangles + the area the view may roam (null = infinite).
   const layout = useMemo(
     () => computeDocLayout(state.doc, state),
@@ -263,7 +315,7 @@ export default function Board({
   // Pen options panel (colour / width / opacity). Always there with a mouse;
   // on a touch screen it opens on demand (tap the pen button again, or
   // long-press the board with a finger) and closes once you write.
-  const [penPanelOpen, setPenPanelOpen] = useState(!TOUCH);
+  const [penPanelOpen, setPenPanelOpen] = useState(true);
   // Properties panel: every property is one `name: value` line; the one
   // named here is unfolded to show its choices.
   const [openProp, setOpenProp] = useState(null);
@@ -273,7 +325,18 @@ export default function Board({
   // Pen kind: 'pen' or 'highlighter' (wide, translucent, constant width). Each
   // keeps its own colour / width / opacity; the other one's are parked here.
   const [penKind, setPenKind] = useState('pen');
-  const parkedPenRef = useRef({ color: '#ffd43b', width: 14, opacity: 35 });
+  // Select tool: drag a rectangle, or draw a free loop (lasso).
+  const [selectKind, setSelectKind] = useState('rect');
+  // What a rectangle / lasso picks up: everything, only ink, or only objects.
+  const [selectFilter, setSelectFilter] = useState('all');
+  // Eraser: what it may rub out, and whether it hands back to the pen after one go.
+  const [eraserTarget, setEraserTarget] = useState('all'); // 'all' | 'ink' | 'pen' | 'hl'
+  const [eraserAuto, setEraserAuto] = useState(false);
+  // Highlighter draws ruler-straight lines (start → end).
+  const [hlStraight, setHlStraight] = useState(() => prefs.get('catego-hl-straight') !== 'false');
+  useEffect(() => { prefs.set('catego-hl-straight', String(hlStraight)); }, [hlStraight, prefs]);
+  // Page strip (paged documents).
+  const [pagesOpen, setPagesOpen] = useState(false);
   // Page-setup popover (infinite board ⇄ sheets).
   const [pageMenuOpen, setPageMenuOpen] = useState(false);
   // Finger gestures (see the touch adapter in Canvas.jsx).
@@ -283,8 +346,9 @@ export default function Board({
     toolModeRef.current = toolMode;
     if (toolMode !== 'eraser') lastToolRef.current = toolMode;
   }, [toolMode]);
-  // Two-finger tap: eraser ⇄ the tool used before it.
-  const onTwoFingerTap = useCallback(() => {
+  // Quick double tap with one finger: eraser ⇄ the tool used before it.
+  // (Two-finger tap = undo, three-finger tap = redo — wired at <Canvas>.)
+  const onDoubleTap = useCallback(() => {
     setToolMode(toolModeRef.current === 'eraser' ? (lastToolRef.current || 'draw') : 'eraser');
   }, []);
   // Long press: pen options (switching to the pen if needed).
@@ -292,9 +356,19 @@ export default function Board({
     if (toolModeRef.current === 'draw') setPenPanelOpen((v) => !v);
     else { setToolMode('draw'); setPenPanelOpen(true); }
   }, []);
-  const [drawColor, setDrawColor] = useState('#cf7bf0');
-  const [drawWidth, setDrawWidth] = useState(TOUCH ? 2 : 4); // handwriting wants a finer line
-  const [drawOpacity, setDrawOpacity] = useState(100); // 1–100
+  // Pens: three slots per kind (see defaultPens); the one in hand supplies
+  // colour / width / opacity, and editing those edits the slot.
+  const [pens, setPens] = useState(() => loadPens(prefs.get('catego-pens')));
+  const [penSlot, setPenSlot] = useState({ pen: 0, highlighter: 0 });
+  useEffect(() => { prefs.set('catego-pens', JSON.stringify(pens)); }, [pens, prefs]);
+  const curPen = pens[penKind][penSlot[penKind]] || pens[penKind][0];
+  const drawColor = curPen.color, drawWidth = curPen.width, drawOpacity = curPen.opacity;
+  const updatePen = useCallback((patch) => {
+    setPens((prev) => ({ ...prev, [penKind]: prev[penKind].map((v, i) => (i === penSlot[penKind] ? { ...v, ...patch } : v)) }));
+  }, [penKind, penSlot]);
+  const setDrawColor = useCallback((color) => updatePen({ color }), [updatePen]);
+  const setDrawWidth = useCallback((width) => updatePen({ width }), [updatePen]);
+  const setDrawOpacity = useCallback((opacity) => updatePen({ opacity }), [updatePen]);
 
   // When on, the selected arrow shows Illustrator-style bezier control
   // handles you can drag to reshape its curve.
@@ -375,21 +449,47 @@ export default function Board({
       // whole:true renders the ENTIRE board at world scale — every node at its
       // real size, so text stays crisp and nothing is hidden no matter how far
       // out the user is zoomed. Otherwise we capture just the current viewport.
+      // Pictures are embedded: an SVG rasterised through <img> can't load them itself.
+      const images = {};
+      for (const n of Object.values(state.nodes)) {
+        if (n.shape !== 'image' || !n.image || images[n.image]) continue;
+        try {
+          if (/^data:/.test(n.image)) { images[n.image] = n.image; continue; }
+          if (!assets || !assets.data) continue;
+          const buf = await assets.data(n.image);
+          if (!buf) continue;
+          const ext = (n.image.split('.').pop() || '').toLowerCase();
+          const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : ext === 'svg' ? 'image/svg+xml' : 'image/jpeg';
+          images[n.image] = await new Promise((resolve, reject) => { const fr = new FileReader(); fr.onload = () => resolve(fr.result); fr.onerror = reject; fr.readAsDataURL(new Blob([buf], { type: mime })); });
+        } catch { /* left as a frame */ }
+      }
       // A paged document prints as a real multi-page PDF: one sheet per page
       // (the trailing blank sheet is left out).
       if (format === 'pdf' && layout) {
         const sheets = layout.pages.slice(0, Math.max(1, layout.count - 1));
         const orientation = layout.w >= layout.h ? 'landscape' : 'portrait';
         const pdf = new jsPDF({ orientation, unit: 'px', format: [layout.w, layout.h], compress: true });
+        const light = document.body.classList.contains('light-theme');
         for (let i = 0; i < sheets.length; i++) {
-          const sheetCanvas = await svgToCanvas(buildExportSvg(state, { rect: sheets[i], paper: layout.bg }), 2);
+          const part = sliceRect(state, sheets[i]);
+          let sheetCanvas;
+          if (sheets[i].bg && pdfService) {
+            // A PDF sheet: the page itself, then the writing on top of it.
+            sheetCanvas = await pdfService.renderPage(sheets[i].bg.src, sheets[i].bg.page, layout.w * 2).catch(() => null);
+            if (sheetCanvas && !light) invertCanvas(sheetCanvas);
+            const ink = await svgToCanvas(buildExportSvg(part, { rect: sheets[i], transparent: true, images }), 2);
+            if (sheetCanvas) sheetCanvas.getContext('2d').drawImage(ink, 0, 0, sheetCanvas.width, sheetCanvas.height);
+            else sheetCanvas = ink;
+          } else {
+            sheetCanvas = await svgToCanvas(buildExportSvg(part, { rect: sheets[i], paper: layout.bg, images }), 2);
+          }
           if (i > 0) pdf.addPage([layout.w, layout.h], orientation);
           pdf.addImage(sheetCanvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, layout.w, layout.h);
         }
         pdf.save(`catego-${ts}.pdf`);
         return;
       }
-      const svg = buildExportSvg(state, { viewportOnly: !whole });
+      const svg = buildExportSvg(state, { viewportOnly: !whole, images });
       const canvas = await svgToCanvas(svg, pixelRatio);
       const suffix = whole ? '-board' : '';
       if (format === 'png') {
@@ -431,7 +531,7 @@ export default function Board({
     } finally {
       setPrintBusy(false);
     }
-  }, [state, layout]);
+  }, [state, layout, assets, pdfService]);
 
   const toggleSourceMode = useCallback(() => {
     setSourceMode(prev => {
@@ -694,6 +794,8 @@ export default function Board({
     const snap = historyRef.current[historyIndexRef.current];
     setState(prev => applySnapshot(prev, snap));
     send({ type: 'state:undo', state: snap });
+    const curDoc = stateRef.current.doc;
+    if (curDoc && 'bgs' in snap && !sameBgs(curDoc.bgs, snap.bgs)) send({ type: 'doc:update', doc: docWithBgs(curDoc, snap.bgs) });
     setHistoryIndex(historyIndexRef.current);
     setSelection({ nodeIds: new Set(), arrowIds: new Set(), strokeIds: new Set() });
     setSelectedId(null);
@@ -708,6 +810,8 @@ export default function Board({
     const snap = historyRef.current[historyIndexRef.current];
     setState(prev => applySnapshot(prev, snap));
     send({ type: 'state:undo', state: snap });
+    const curDoc = stateRef.current.doc;
+    if (curDoc && 'bgs' in snap && !sameBgs(curDoc.bgs, snap.bgs)) send({ type: 'doc:update', doc: docWithBgs(curDoc, snap.bgs) });
     setHistoryIndex(historyIndexRef.current);
     setSelection({ nodeIds: new Set(), arrowIds: new Set(), strokeIds: new Set() });
     setSelectedId(null);
@@ -1002,7 +1106,7 @@ export default function Board({
       return { ...prev, strokes: [...(prev.strokes || []), strokeWithId] };
     });
     send({ type: 'stroke:add', stroke: strokeWithId });
-    if (TOUCH) { setPenPanelOpen(false); setFnOpen(false); } // writing: get the panels out of the way
+    if (TOUCH) setFnOpen(false); // writing: fold the corner toolbar away
   }, [setStateWithHistory, send]);
 
   // Region callbacks
@@ -1181,14 +1285,18 @@ export default function Board({
     if (!eraseDirtyRef.current) return;
     eraseDirtyRef.current = false;
     setState((prev) => { pushHistorySnapshot(prev); return prev; });
-  }, [pushHistorySnapshot]);
+    // "Auto": one erasing gesture, then back to the tool it interrupted.
+    if (eraserAuto) setToolMode(lastToolRef.current && lastToolRef.current !== 'eraser' ? lastToolRef.current : 'draw');
+  }, [pushHistorySnapshot, eraserAuto]);
 
   /* ================================================================
      Rectangle selection callbacks
      ================================================================ */
   const onSelectionChange = useCallback((sel) => {
-    setSelection(sel);
-  }, []);
+    if (selectFilter === 'ink') setSelection({ ...sel, nodeIds: new Set(), arrowIds: new Set(), regionIds: new Set() });
+    else if (selectFilter === 'objects') setSelection({ ...sel, strokeIds: new Set() });
+    else setSelection(sel);
+  }, [selectFilter]);
 
   const onDeleteSelection = useCallback(() => {
     const { nodeIds, arrowIds, strokeIds } = selection;
@@ -1409,8 +1517,33 @@ export default function Board({
     return true;
   }, [setStateWithHistory, send]);
 
+  const addImageBlobRef = useRef(null);
   const pasteFromClipboard = useCallback(() => {
-    if (boardClipboard) { pasteClip(boardClipboard); return; }
+    // A picture on the system clipboard (screenshot, copied image) wins: it is
+    // the newest thing copied. No picture / no permission → the board buffer.
+    const viaBoard = () => {
+      if (boardClipboard) { pasteClip(boardClipboard); return true; }
+      return false;
+    };
+    try {
+      if (navigator.clipboard && navigator.clipboard.read) {
+        navigator.clipboard.read().then(async (items) => {
+          for (const it of items) {
+            const type = (it.types || []).find((t) => t.startsWith('image/'));
+            if (type) { const blob = await it.getType(type); if (addImageBlobRef.current) addImageBlobRef.current(blob, 'pasted.png'); return; }
+          }
+          if (viaBoard()) return;
+          for (const it of items) {
+            if (!(it.types || []).includes('text/plain')) continue;
+            const text = await (await it.getType('text/plain')).text();
+            try { const clip = JSON.parse(text); if (clip && clip.catego === 1) { boardClipboard = clip; pasteClip(clip); } } catch { /* not a board */ }
+            return;
+          }
+        }).catch(() => { viaBoard(); });
+        return;
+      }
+    } catch { /* fall through */ }
+    if (viaBoard()) return;
     // Nothing copied in this window — maybe another window / tab did.
     try {
       navigator.clipboard?.readText?.().then((text) => {
@@ -1444,7 +1577,7 @@ export default function Board({
 
   // Lasso finished: with something caught, hand over to the Select tool so
   // the catch can be moved, resized, recoloured or deleted.
-  const onLassoEnd = useCallback((found) => { if (found) setToolMode('select'); }, []);
+  const onLassoEnd = useCallback(() => {}, []);
 
   const duplicateSelection = useCallback(() => {
     const clip = collectClip();
@@ -1452,6 +1585,201 @@ export default function Board({
     pasteCountRef.current = 0;
     pasteClip(clip);
   }, [collectClip, pasteClip]);
+
+
+  /* ================================================================
+     Whole-board edits (page operations, add space, agent inbox): one undo
+     step, broadcast as a full snapshot — the same message undo uses.
+     ================================================================ */
+  const commitBulk = useCallback((fn) => {
+    const prev = stateRef.current;
+    const res = fn(prev);
+    if (!res) return false;
+    const patch = { nodes: res.nodes, arrows: res.arrows, regions: res.regions, strokes: res.strokes, doc: res.doc !== undefined ? res.doc : prev.doc };
+    const next = { ...prev, ...patch };
+    stateRef.current = next;
+    setState((cur) => ({ ...cur, ...patch }));
+    pushHistorySnapshot(next);
+    send({ type: 'state:undo', state: takeSnapshot(next) });
+    if (patch.doc !== prev.doc) send({ type: 'doc:update', doc: patch.doc });
+    setSelection({ nodeIds: new Set(), arrowIds: new Set(), strokeIds: new Set(), regionIds: new Set() });
+    setSelectedId(null); setSelectedType(null);
+    return next;
+  }, [pushHistorySnapshot, send]);
+
+  // World point in the middle of the view (read from the DOM: a pan in
+  // progress hasn't reached React state yet).
+  const viewCentre = useCallback(() => {
+    const el = rootRef.current;
+    const tr = el && el.querySelector('.canvas-transform');
+    const m = tr && (tr.style.transform || '').match(/translate\(([^,]+)px,\s*([^)]+)px\)\s*scale\(([^)]+)\)/);
+    const vp = m ? { panX: parseFloat(m[1]), panY: parseFloat(m[2]), zoom: parseFloat(m[3]) } : stateRef.current.viewport;
+    const w = el ? el.clientWidth : window.innerWidth, h = el ? el.clientHeight : window.innerHeight;
+    return { x: (w / 2 - vp.panX) / vp.zoom, y: (h / 2 - vp.panY) / vp.zoom, vp, w, h };
+  }, []);
+
+  // Page under the middle of the view.
+  const currentPage = layout
+    ? pageIndexAt(layout, ((rootRef.current ? rootRef.current.clientHeight : 800) / 2 - viewport.panY) / viewport.zoom)
+    : 0;
+  const goToPage = useCallback((i) => {
+    const lay = layoutRef.current;
+    if (lay) fitPage(Math.max(0, Math.min(lay.count - 1, i)), lay);
+  }, [fitPage]);
+  // After a page operation: show page i of the NEW layout (derived from the
+  // state the operation produced).
+  const afterPageOp = useCallback((next, i) => {
+    if (next && next.doc) fitPage(i, computeDocLayout(next.doc, next));
+  }, [fitPage]);
+  const onInsertPage = useCallback((i) => { afterPageOp(commitBulk((st) => insertPage(st, i)), i); }, [commitBulk, afterPageOp]);
+  const onDeletePage = useCallback((i) => { afterPageOp(commitBulk((st) => deletePage(st, i)), Math.max(0, i - 1)); }, [commitBulk, afterPageOp]);
+  const onMovePage = useCallback((from, to) => { if (to >= 0) afterPageOp(commitBulk((st) => movePage(st, from, to)), to); }, [commitBulk, afterPageOp]);
+  const onDuplicatePage = useCallback((i) => { afterPageOp(commitBulk((st) => duplicatePage(st, i, genId)), i + 1); }, [commitBulk, afterPageOp]);
+  // "Add space" tool: push everything below a line down (or pull it up).
+  const onAddSpace = useCallback((y0, dy) => { commitBulk((st) => shiftBelow(st, y0, dy)); }, [commitBulk]);
+
+  /* ================================================================
+     Pictures and PDFs
+     ================================================================ */
+  const [busyNote, setBusyNote] = useState(null); // "Importing…" banner
+  const fileInputRef = useRef(null);
+
+  // Put a picture on the board: `src` is an asset reference (or a data URL).
+  const placeImage = useCallback((src, natW, natH, at = null) => {
+    const c = viewCentre();
+    const sn = (v) => Math.round(v / 20) * 20;
+    const maxW = Math.min(600, Math.max(120, (c.w / c.vp.zoom) * 0.6));
+    const width = Math.max(40, sn(Math.min(natW || 320, maxW)));
+    const height = Math.max(20, Math.round((width * (natH || 240)) / (natW || 320)));
+    const id = genId();
+    const node = { id, shape: 'image', image: src, x: sn((at ? at.x : c.x) - width / 2), y: sn((at ? at.y : c.y) - height / 2), width, height, text: '', color: '#ffffff' };
+    setStateWithHistory((prev) => ({ ...prev, nodes: { ...prev.nodes, [id]: node } }));
+    send({ type: 'node:add', node });
+    setToolMode('select');
+    setSelectedId(id); setSelectedType('node');
+  }, [viewCentre, setStateWithHistory, send]);
+
+  const addImageBlob = useCallback(async (blob, name = 'image.png', at = null) => {
+    const objUrl = URL.createObjectURL(blob);
+    try {
+      const img = await new Promise((resolve, reject) => { const im = new Image(); im.onload = () => resolve(im); im.onerror = () => reject(new Error('Not an image')); im.src = objUrl; });
+      const natW = img.naturalWidth || 320, natH = img.naturalHeight || 240;
+      let src;
+      if (assets && assets.save) src = await assets.save(blob, name);
+      else {
+        // No asset store: keep the picture inside the board, downscaled.
+        const k = Math.min(1, IMAGE_MAX_EMBED / Math.max(natW, natH));
+        const cv = document.createElement('canvas');
+        cv.width = Math.round(natW * k); cv.height = Math.round(natH * k);
+        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+        src = cv.toDataURL(/png/i.test(blob.type) && blob.size < 400000 ? 'image/png' : 'image/jpeg', 0.85);
+      }
+      placeImage(src, natW, natH, at);
+    } catch (e) {
+      alert('Could not add the picture: ' + ((e && e.message) || e));
+    } finally { URL.revokeObjectURL(objUrl); }
+  }, [assets, placeImage]);
+
+  // A PDF already stored as an asset → one sheet per page, appended after the
+  // last used sheet (a board that isn't a document yet becomes one, sized to
+  // the PDF's first page).
+  const importPdfSrc = useCallback(async (src) => {
+    if (!pdf) { alert('PDF import is not available here.'); return; }
+    setBusyNote('Importing PDF…');
+    try {
+      const sizes = await pdf.pageSizes(src);
+      if (!sizes.length) throw new Error('The PDF has no pages');
+      let start = 0;
+      const ok = commitBulk((st) => {
+        let doc = st.doc;
+        const blank = !doc || (!contentBounds(st) && !doc.bgs);
+        if (blank) {
+          const cb = contentBounds(st);
+          const down = (v) => Math.floor(v / 20) * 20;
+          const w = 820, h = Math.max(200, Math.round((w * sizes[0].h) / sizes[0].w / 20) * 20);
+          doc = { ...makeDoc('a4', 'blank', !doc && cb ? { x: down(cb.x0 - 40), y: down(cb.y0 - 40) } : (doc ? { x: doc.x, y: doc.y } : null)), w, h, paper: 'a4' };
+        }
+        const lay = computeDocLayout(doc, st);
+        start = blank && !contentBounds(st) ? 0 : lay.count - 1;
+        const bgs = { ...(doc.bgs || {}) };
+        sizes.forEach((_, i) => { bgs[start + i] = { src, page: i + 1 }; });
+        return { nodes: st.nodes, arrows: st.arrows, regions: st.regions || {}, strokes: st.strokes || [], doc: { ...doc, bgs } };
+      });
+      if (ok) { setPagesOpen(true); afterPageOp(ok, start); }
+    } catch (e) {
+      alert('Could not import the PDF: ' + ((e && e.message) || e));
+    } finally { setBusyNote(null); }
+  }, [pdf, commitBulk, afterPageOp]);
+
+  const addFiles = useCallback(async (files, at = null) => {
+    for (const f of files) {
+      if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')) {
+        if (!assets || !assets.save || !pdf) { alert('PDF import is not available here.'); continue; }
+        setBusyNote('Importing PDF…');
+        let src = null;
+        try { src = await assets.save(f, f.name || 'document.pdf'); } catch (e) { alert('Could not store the PDF: ' + ((e && e.message) || e)); }
+        setBusyNote(null);
+        if (src) await importPdfSrc(src);
+      } else if ((f.type || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|svg|heic|bmp)$/i.test(f.name || '')) {
+        await addImageBlob(f, f.name || 'image.png', at);
+      }
+    }
+  }, [assets, pdf, importPdfSrc, addImageBlob]);
+  const pickFiles = useCallback((accept) => {
+    const el = fileInputRef.current;
+    if (!el) return;
+    el.accept = accept;
+    el.value = '';
+    el.click();
+  }, []);
+
+  useEffect(() => { addImageBlobRef.current = addImageBlob; });
+
+  // Files dragged from the desktop onto the board.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return undefined;
+    const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+    const over = (e) => { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } };
+    const drop = (e) => {
+      if (!hasFiles(e) || !e.dataTransfer.files.length) return;
+      e.preventDefault();
+      const rect = root.getBoundingClientRect();
+      const c = viewCentre();
+      addFiles(Array.from(e.dataTransfer.files), { x: (e.clientX - rect.left - c.vp.panX) / c.vp.zoom, y: (e.clientY - rect.top - c.vp.panY) / c.vp.zoom });
+    };
+    root.addEventListener('dragover', over);
+    root.addEventListener('drop', drop);
+    return () => { root.removeEventListener('dragover', over); root.removeEventListener('drop', drop); };
+  }, [addFiles, viewCentre]);
+
+  // Host bridge: files that already live in the host's store (vault), and
+  // the agent inbox (src/agentOps.js).
+  useEffect(() => {
+    if (!bridge) return;
+    bridge.importPdfSrc = importPdfSrc;
+    bridge.addImageSrc = (src, clientX, clientY) => {
+      const root = rootRef.current;
+      const rect = root ? root.getBoundingClientRect() : { left: 0, top: 0 };
+      const c = viewCentre();
+      const at = clientX != null ? { x: (clientX - rect.left - c.vp.panX) / c.vp.zoom, y: (clientY - rect.top - c.vp.panY) / c.vp.zoom } : null;
+      Promise.resolve(assets && assets.url ? assets.url(src) : src).then((url) => new Promise((resolve) => {
+        const im = new Image();
+        im.onload = () => resolve([im.naturalWidth, im.naturalHeight]);
+        im.onerror = () => resolve([320, 240]);
+        im.src = url;
+      })).then(([w, h]) => placeImage(src, w, h, at));
+    };
+    bridge.applyAgentOps = (ops, done) => {
+      let applied = [];
+      commitBulk((st) => {
+        const res = applyAgentOps(st, ops, done);
+        applied = res.applied;
+        return res.changed ? res.state : null;
+      });
+      return applied;
+    };
+  });
 
   /* ================================================================
      Vim-mode: Tab toggle + WASD nudge
@@ -2639,16 +2967,16 @@ export default function Board({
      ================================================================ */
   const switchPenKind = useCallback((kind) => {
     if (kind === penKind) return;
-    const parked = parkedPenRef.current;
-    parkedPenRef.current = { color: drawColor, width: drawWidth, opacity: drawOpacity };
-    setDrawColor(parked.color); setDrawWidth(parked.width); setDrawOpacity(parked.opacity);
     setPenKind(kind);
-  }, [penKind, drawColor, drawWidth, drawOpacity]);
+  }, [penKind]);
 
-  const handleDrawTap = useCallback(() => {
-    if (toolMode === 'draw') setPenPanelOpen((v) => !v);
-    else setToolMode('draw');
-  }, [toolMode]);
+  // Pen / highlighter buttons: pick that pen; pressing the active one again
+  // shows / hides its options bar.
+  const pickPen = useCallback((kind) => {
+    if (toolMode === 'draw' && penKind === kind) { setPenPanelOpen((v) => !v); return; }
+    switchPenKind(kind);
+    setToolMode('draw');
+  }, [toolMode, penKind, switchPenKind]);
 
   /* ================================================================
      Toolbar actions
@@ -2968,7 +3296,7 @@ export default function Board({
         case 'Digit5': setToolMode('region'); break;
         case 'Digit7': setToolMode('draw'); break;
         case 'Digit8': setToolMode('eraser'); setShowDrawOptions(false); break;
-        case 'Digit9': setToolMode('lasso'); setShowDrawOptions(false); break;
+        case 'Digit9': setSelectKind((k) => (k === 'lasso' ? 'rect' : 'lasso')); setToolMode('select'); break;
         default: return;
       }
       e.preventDefault();
@@ -2997,7 +3325,7 @@ export default function Board({
       onUpdateRegion(selectedId, { color });
       pushHistorySnapshot({ ...state, regions: { ...state.regions, [selectedId]: { ...state.regions[selectedId], color } } });
     }
-  }, [selectedId, selectedType, onUpdateNode, onUpdateRegion, toolMode, state, pushHistorySnapshot]);
+  }, [selectedId, selectedType, onUpdateNode, onUpdateRegion, toolMode, state, pushHistorySnapshot, setDrawColor]);
 
   const activeColor = toolMode === 'draw' ? drawColor
     : selectedId && selectedType === 'node' ? (nodes[selectedId]?.color || '#cf7bf0')
@@ -3014,70 +3342,87 @@ export default function Board({
      ================================================================ */
   /* Render */
   return (
-    <div className="catego-root" ref={rootRef}>
+    <div className={`catego-root${pagesOpen && layout ? ' pages-open' : ''}`} ref={rootRef}>
       {overlay}
-      {/* Tools toolbar (centered, top) — icons only */}
+      <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }}
+        onChange={(e) => { const files = Array.from(e.target.files || []); if (files.length) addFiles(files); }} />
+      {busyNote && <div className="busy-note">{busyNote}</div>}
+      {/* Tools toolbar (centered, top) — icons only. Order: select, pen,
+          highlighter, eraser, text, node, arrow, region, figure, move. */}
       <div className="toolbar toolbar-tools">
         <button
-          className={`toolbar-btn${toolMode === 'select' ? ' tool-active' : ''}`}
-          onClick={() => { setToolMode('select'); setShowDrawOptions(false); }}
-          title="Select (pointer)"
+          className={`toolbar-btn${(toolMode === 'select' || toolMode === 'lasso') ? ' tool-active' : ''}`}
+          onClick={() => setToolMode('select')}
+          title="Select — rectangle or lasso (options below)"
         >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <path d="M3 2l2 12 3-4 5-1L3 2z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" fill="none" />
           </svg>
-                  <span className="hk-pill">1</span>
+          <span className="hk-pill">1</span>
         </button>
         <button
-          className={`toolbar-btn${toolMode === 'lasso' ? ' tool-active' : ''}`}
-          onClick={() => { setToolMode(toolMode === 'lasso' ? 'select' : 'lasso'); setShowDrawOptions(false); }}
-          title="Lasso (draw a loop around ink and nodes to select them)"
+          className={`toolbar-btn${(toolMode === 'draw' && penKind === 'pen') ? ' tool-active' : ''}`}
+          onClick={() => pickPen('pen')}
+          title="Pen — press again to show / hide its options"
         >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
-            <path d="M8 2.2c3.3 0 5.8 1.6 5.8 3.9S11.3 10 8 10 2.2 8.4 2.2 6.1 4.7 2.2 8 2.2z" stroke="currentColor" strokeWidth="1.4" strokeDasharray="2.6 1.8" />
-            <path d="M5.2 9.6c-.9.6-1.2 1.6-.6 2.3.6.7 1.7.5 2-.3.3-.9-.6-1.3-1.5-.9-1 .5-1.6 1.6-1.4 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            <path d="M2.5 13.5s1-2 3-4 4-3.5 5.5-5S13 2.5 13 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
           </svg>
-                  <span className="hk-pill">9</span>
+          <span className="hk-pill">7</span>
         </button>
         <button
-          className={`toolbar-btn${toolMode === 'move' ? ' tool-active' : ''}`}
-          onClick={() => { setToolMode('move'); setShowDrawOptions(false); }}
-          title="Move (pan)"
+          className={`toolbar-btn${(toolMode === 'draw' && penKind === 'highlighter') ? ' tool-active' : ''}`}
+          onClick={() => pickPen('highlighter')}
+          title="Highlighter — press again to show / hide its options"
         >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
-            <path d="M8 1v14M1 8h14M8 1l-2.5 2.5M8 1l2.5 2.5M8 15l-2.5-2.5M8 15l2.5-2.5M1 8l2.5-2.5M1 8l2.5 2.5M15 8l-2.5-2.5M15 8l-2.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M9.2 2.6l4.2 4.2-6 6H3.2V8.6l6-6z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /><path d="M2 14.6h12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" opacity="0.55" />
           </svg>
-                  <span className="hk-pill">2</span>
+        </button>
+        <button
+          className={`toolbar-btn${toolMode === 'eraser' ? ' tool-active' : ''}`}
+          onClick={() => setToolMode('eraser')}
+          title="Eraser"
+        >
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
+            <path d="M6 14h8M3.5 11.5l7-7a1.41 1.41 0 012 2l-7 7H3l-.5-.5a1.41 1.41 0 010-2z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <span className="hk-pill">8</span>
+        </button>
+        <button className="toolbar-btn" onClick={handleAddText} title="Add Text">
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
+            <path d="M3 4V3h10v1M8 3v10M6 13h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
         </button>
         <button
           className={`toolbar-btn${toolMode === 'node' ? ' tool-active' : ''}`}
-          onClick={() => { setToolMode(toolMode === 'node' ? 'select' : 'node'); setShowDrawOptions(false); }}
+          onClick={() => setToolMode(toolMode === 'node' ? 'select' : 'node')}
           title="Node (click or drag a box)"
         >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <rect x="2" y="4.5" width="12" height="7" rx="2" stroke="currentColor" strokeWidth="1.5" fill="none" />
           </svg>
-                  <span className="hk-pill">3</span>
+          <span className="hk-pill">3</span>
         </button>
         <button
           className={`toolbar-btn${toolMode === 'arrow' ? ' tool-active' : ''}`}
-          onClick={() => { setToolMode(toolMode === 'arrow' ? 'select' : 'arrow'); setShowDrawOptions(false); }}
+          onClick={() => setToolMode(toolMode === 'arrow' ? 'select' : 'arrow')}
           title="Arrow (drag on empty canvas to draw a connection)"
         >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <path d="M3 13L13 3M8.5 3H13V7.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-                  <span className="hk-pill">4</span>
+          <span className="hk-pill">4</span>
         </button>
         <button
           className={`toolbar-btn${toolMode === 'region' ? ' tool-active' : ''}`}
-          onClick={() => { setToolMode(toolMode === 'region' ? 'select' : 'region'); setShowDrawOptions(false); }}
-          title="Region (click or drag a box)"
+          onClick={() => setToolMode(toolMode === 'region' ? 'select' : 'region')}
+          title="Region — a named frame around a part of the board (drag a box)"
         >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
-            <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="1.5" strokeDasharray="2.5 2" fill="none" />
+            <path d="M2.5 6.2h11v7.3h-11z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /><path d="M2.5 6.2V3.4h5v2.8" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /><path d="M4.2 4.8h1.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
           </svg>
-                  <span className="hk-pill">5</span>
+          <span className="hk-pill">5</span>
         </button>
         <div style={{ position: 'relative' }}>
           <button
@@ -3113,102 +3458,130 @@ export default function Board({
             </div>
           )}
         </div>
-        <button
-          className={`toolbar-btn${toolMode === 'draw' ? ' tool-active' : ''}`}
-          onClick={handleDrawTap}
-          title="Draw (freehand) — press again to show / hide pen options"
-        >
+        <button className="toolbar-btn" onClick={() => pickFiles(pdf ? 'image/*,application/pdf' : 'image/*')}
+          title={pdf ? 'Picture or PDF — a PDF becomes sheets you can write on (⌘V pastes a picture)' : 'Picture (⌘V pastes one)'}>
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
-            <path d="M2.5 13.5s1-2 3-4 4-3.5 5.5-5S13 2.5 13 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            <rect x="2" y="3" width="12" height="10" rx="1.6" stroke="currentColor" strokeWidth="1.4" />
+            <circle cx="5.6" cy="6.4" r="1.1" fill="currentColor" />
+            <path d="M2.6 11.6l3.3-3.1 2.3 2 2.2-2.6 3 3.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-                  <span className="hk-pill">7</span>
         </button>
         <button
-          className={`toolbar-btn${toolMode === 'eraser' ? ' tool-active' : ''}`}
-          onClick={() => { setToolMode('eraser'); setShowDrawOptions(false); }}
-          title="Eraser"
+          className={`toolbar-btn${toolMode === 'space' ? ' tool-active' : ''}`}
+          onClick={() => setToolMode(toolMode === 'space' ? 'select' : 'space')}
+          title="Add space — drag down to push everything below further down (drag up to close a gap)"
         >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
-            <path d="M6 14h8M3.5 11.5l7-7a1.41 1.41 0 012 2l-7 7H3l-.5-.5a1.41 1.41 0 010-2z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M2 3h12M2 13h12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            <path d="M8 5.2v5.6M6 7l2-1.8L10 7M6 9l2 1.8L10 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-                  <span className="hk-pill">8</span>
         </button>
-        <button className="toolbar-btn" onClick={handleAddText} title="Add Text">
+        <button
+          className={`toolbar-btn${toolMode === 'move' ? ' tool-active' : ''}`}
+          onClick={() => setToolMode('move')}
+          title="Move (pan)"
+        >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
-            <path d="M3 4V3h10v1M8 3v10M6 13h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M8 1v14M1 8h14M8 1l-2.5 2.5M8 1l2.5 2.5M8 15l-2.5-2.5M8 15l2.5-2.5M1 8l2.5-2.5M1 8l2.5 2.5M15 8l-2.5-2.5M15 8l-2.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
+          <span className="hk-pill">2</span>
         </button>
 
-        {/* Eraser options */}
-        {toolMode === 'eraser' && (
-          <>
-            <div className="eraser-options">
-              <button
-                className={`eraser-mode-btn${eraserMode === 'object' ? ' active' : ''}`}
-                onClick={() => setEraserMode('object')}
-                title="Object eraser: removes entire objects"
-              >
-                Object
-              </button>
-              <button
-                className={`eraser-mode-btn${eraserMode === 'pixel' ? ' active' : ''}`}
-                onClick={() => setEraserMode('pixel')}
-                title="Pixel eraser: splits strokes"
-              >
-                Pixel
-              </button>
-            </div>
-            <input
-              type="range"
-              className="eraser-radius-slider"
-              min="8"
-              max="40"
-              value={eraserRadius}
-              onChange={(e) => setEraserRadius(Number(e.target.value))}
-              title={`Radius: ${eraserRadius}px`}
-            />
-          </>
-        )}
-
-      </div>
-
-      {/* Pen toolbar — shown while drawing: color, width (1–10), opacity (1–100) */}
-      {toolMode === 'draw' && penPanelOpen && (
-        <div className="pen-toolbar">
-          <div className="seg-row">
-            <button className={`seg-btn${penKind === 'pen' ? ' active' : ''}`} onClick={() => switchPenKind('pen')}>Pen</button>
-            <button className={`seg-btn${penKind === 'highlighter' ? ' active' : ''}`} onClick={() => switchPenKind('highlighter')}>Highlighter</button>
+        {/* Options of the active tool — a slim bar hanging under the toolbar. */}
+        {(toolMode === 'select' || toolMode === 'lasso') && (
+          <div className="tool-options">
+            <button className={`opt-chip${selectKind === 'rect' ? ' active' : ''}`} onClick={() => setSelectKind('rect')} title="Drag a rectangle to select">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="3.5" width="11" height="9" rx="1" stroke="currentColor" strokeWidth="1.4" strokeDasharray="2.4 1.8" /></svg>
+              Rectangle
+            </button>
+            <button className={`opt-chip${selectKind === 'lasso' ? ' active' : ''}`} onClick={() => setSelectKind('lasso')} title="Draw a loop around ink and nodes (9)">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+                <path d="M8 2.2c3.3 0 5.8 1.6 5.8 3.9S11.3 10 8 10 2.2 8.4 2.2 6.1 4.7 2.2 8 2.2z" stroke="currentColor" strokeWidth="1.4" strokeDasharray="2.6 1.8" />
+                <path d="M5.2 9.6c-.9.6-1.2 1.6-.6 2.3.6.7 1.7.5 2-.3.3-.9-.6-1.3-1.5-.9-1 .5-1.6 1.6-1.4 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              </svg>
+              Lasso
+            </button>
+            <span className="opt-sep" />
+            {[['all', 'All', 'Select everything in the area'], ['ink', 'Ink', 'Select handwriting only'], ['objects', 'Objects', 'Select nodes, pictures and regions only']].map(([key, label, tip]) => (
+              <button key={key} className={`opt-chip${selectFilter === key ? ' active' : ''}`} onClick={() => setSelectFilter(key)} title={tip}>{label}</button>
+            ))}
           </div>
-          <div className="pen-group">
-            <span className="props-label">Color</span>
-            <div className="color-palette">
+        )}
+        {toolMode === 'space' && (
+          <div className="tool-options">
+            <span className="opt-hint">Drag down from a line to open space below it · drag up to close a gap</span>
+          </div>
+        )}
+        {toolMode === 'draw' && penPanelOpen && (
+          <div className="tool-options">
+            <div className="opt-pens">
+              {pens[penKind].map((pn, i) => {
+                const d = penKind === 'highlighter' ? Math.max(5, Math.min(16, pn.width * 0.7)) : Math.max(3, Math.min(14, pn.width * 1.6));
+                return (
+                  <button key={i} className={`opt-pen${penKind === 'highlighter' ? ' hl' : ''}${penSlot[penKind] === i ? ' active' : ''}`} style={{ '--sw': pn.color }}
+                    onClick={() => setPenSlot((ps) => ({ ...ps, [penKind]: i }))}
+                    title={`${penKind === 'highlighter' ? 'Highlighter' : 'Pen'} ${i + 1} — it keeps its own colour, width and opacity`}>
+                    <i style={penKind === 'highlighter' ? { width: 16, height: d } : { width: d, height: d }} />
+                  </button>
+                );
+              })}
+            </div>
+            <span className="opt-sep" />
+            <div className="opt-swatches">
               {PALETTE.map((c) => (
                 <button
                   key={c}
-                  className={`color-swatch${drawColor === c ? ' active' : ''}`}
-                  style={{ background: c }}
+                  className={`opt-swatch${drawColor === c ? ' active' : ''}`}
+                  style={{ '--sw': c }}
                   onClick={() => setDrawColor(c)}
                   title={c}
                 />
               ))}
             </div>
+            <span className="opt-sep" />
+            <label className="opt-slider" title={`Width ${drawWidth}`}>
+              <span className="opt-dot" style={{ width: Math.max(3, Math.min(18, drawWidth * (penKind === 'highlighter' ? 0.7 : 1.6))), height: Math.max(3, Math.min(18, drawWidth * (penKind === 'highlighter' ? 0.7 : 1.6))), background: drawColor }} />
+              <input
+                type="range" min={penKind === 'highlighter' ? 4 : 0.5} max={penKind === 'highlighter' ? 30 : 10} step={penKind === 'highlighter' ? 1 : 0.5} value={drawWidth}
+                onChange={(e) => setDrawWidth(Number(e.target.value))}
+              />
+              <span className="opt-num">{drawWidth}</span>
+            </label>
+            <span className="opt-sep" />
+            <label className="opt-slider" title={`Opacity ${drawOpacity}%`}>
+              <span className="opt-dot" style={{ width: 12, height: 12, background: drawColor, opacity: drawOpacity / 100 }} />
+              <input
+                type="range" min="1" max="100" step="1" value={drawOpacity}
+                onChange={(e) => setDrawOpacity(Number(e.target.value))}
+              />
+              <span className="opt-num">{drawOpacity}%</span>
+            </label>
+            {penKind === 'highlighter' && (
+              <>
+                <span className="opt-sep" />
+                <button className={`opt-chip${hlStraight ? ' active' : ''}`} onClick={() => setHlStraight((v) => !v)} title="Draw ruler-straight highlights (Shift snaps the angle)">Straight</button>
+              </>
+            )}
           </div>
-          <div className="pen-group">
-            <span className="props-label">Width · {drawWidth}</span>
-            <input
-              type="range" min={penKind === 'highlighter' ? 4 : 0.5} max={penKind === 'highlighter' ? 30 : 10} step={penKind === 'highlighter' ? 1 : 0.5} value={drawWidth}
-              onChange={(e) => setDrawWidth(Number(e.target.value))}
-            />
+        )}
+        {toolMode === 'eraser' && (
+          <div className="tool-options">
+            <button className={`opt-chip${eraserMode === 'object' ? ' active' : ''}`} onClick={() => setEraserMode('object')} title="Removes whole strokes and objects">Whole</button>
+            <button className={`opt-chip${eraserMode === 'pixel' ? ' active' : ''}`} onClick={() => setEraserMode('pixel')} title="Rubs out parts of strokes">Partial</button>
+            <span className="opt-sep" />
+            <label className="opt-slider" title={`Size ${eraserRadius}`}>
+              <span className="opt-dot hollow" style={{ width: Math.max(6, eraserRadius * 0.45), height: Math.max(6, eraserRadius * 0.45) }} />
+              <input type="range" min="8" max="40" value={eraserRadius} onChange={(e) => setEraserRadius(Number(e.target.value))} />
+            </label>
+            <span className="opt-sep" />
+            {[['all', 'All', 'Erases ink and objects'], ['ink', 'Ink', 'Erases handwriting only — nodes and pictures are safe'], ['pen', 'Pen', 'Erases pen strokes only'], ['hl', 'Marker', 'Erases highlighter only']].map(([key, label, tip]) => (
+              <button key={key} className={`opt-chip${eraserTarget === key ? ' active' : ''}`} onClick={() => setEraserTarget(key)} title={tip}>{label}</button>
+            ))}
+            <span className="opt-sep" />
+            <button className={`opt-chip${eraserAuto ? ' active' : ''}`} onClick={() => setEraserAuto((v) => !v)} title="After one erasing stroke, go back to the tool you were using">Auto-back</button>
           </div>
-          <div className="pen-group">
-            <span className="props-label">Opacity · {drawOpacity}%</span>
-            <input
-              type="range" min="1" max="100" step="1" value={drawOpacity}
-              onChange={(e) => setDrawOpacity(Number(e.target.value))}
-            />
-          </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Functions toolbar (top-right) — icons only */}
       <div className={`toolbar toolbar-functions${fnOpen ? ' open' : ' collapsed'}`}>
@@ -3359,6 +3732,11 @@ export default function Board({
                   <button className={`seg-btn${state.doc ? ' active' : ''}`} onClick={() => { if (!state.doc) changeDoc({}); }}>Sheets</button>
                 </div>
               </div>
+              {!state.doc && pdf && (
+                <div className="seg-row">
+                  <button className="seg-btn" onClick={() => { setPageMenuOpen(false); pickFiles('application/pdf'); }}>Import PDF…</button>
+                </div>
+              )}
               {state.doc && (
                 <>
                   <div>
@@ -3376,6 +3754,10 @@ export default function Board({
                         <button key={bg} className={`seg-btn${state.doc.bg === bg ? ' active' : ''}`} onClick={() => changeDoc({ bg })}>{bg[0].toUpperCase() + bg.slice(1)}</button>
                       ))}
                     </div>
+                  </div>
+                  <div className="seg-row">
+                    <button className="seg-btn" onClick={() => { setPagesOpen(true); setPageMenuOpen(false); }}>Pages…</button>
+                    {pdf && <button className="seg-btn" onClick={() => { setPageMenuOpen(false); pickFiles('application/pdf'); }}>Import PDF…</button>}
                   </div>
                   <span className="props-label" style={{ opacity: 0.7, textTransform: 'none', letterSpacing: 0 }}>
                     {layout ? `${layout.count} sheet${layout.count === 1 ? '' : 's'} — a new one appears as you fill the last. PDF export is one page per sheet.` : ''}
@@ -3957,6 +4339,11 @@ export default function Board({
         drawWidth={drawWidth}
         drawOpacity={drawOpacity}
         drawFlat={penKind === 'highlighter'}
+        drawStraight={penKind === 'highlighter' && hlStraight}
+        eraserTarget={eraserTarget}
+        assets={assets}
+        pdf={pdf}
+        onAddSpace={onAddSpace}
         onPlaceObject={onPlaceObject}
         figureShape={figureShape}
         drawStrokes={strokes}
@@ -3989,7 +4376,10 @@ export default function Board({
         docLayout={layout}
         onAltDuplicate={onAltDuplicate}
         onLassoEnd={onLassoEnd}
-        onTwoFingerTap={onTwoFingerTap}
+        onTwoFingerTap={undo}
+        onThreeFingerTap={redo}
+        onDoubleTap={onDoubleTap}
+        selectFree={selectKind === 'lasso'}
         onFingerLongPress={onFingerLongPress}
         noteFor={(id) => notes[id] || null}
         onOpenNote={onOpenNote}
@@ -4003,6 +4393,23 @@ export default function Board({
           </svg>
           <span className="hk-pill">`</span>
         </button>
+      )}
+      {layout && (
+        <div className={`page-chip${pagesOpen ? ' open' : ''}`}>
+          <button onClick={() => goToPage(currentPage - 1)} disabled={currentPage <= 0} title="Previous page">‹</button>
+          <button className="page-chip-num" onClick={() => setPagesOpen((v) => !v)} title="Pages — thumbnails, add, reorder, delete">
+            {currentPage + 1} / {layout.count}
+          </button>
+          <button onClick={() => goToPage(currentPage + 1)} disabled={currentPage >= layout.count - 1} title="Next page">›</button>
+        </div>
+      )}
+      {layout && pagesOpen && (
+        <PagePanel
+          state={state} layout={layout} pdf={pdf} light={false} current={currentPage}
+          onGo={goToPage} onInsert={onInsertPage} onDuplicate={onDuplicatePage} onMove={onMovePage} onDelete={onDeletePage}
+          onImport={pdf ? () => pickFiles('application/pdf') : null}
+          onClose={() => setPagesOpen(false)}
+        />
       )}
       <ModeBadge mode={mode} />
       {showShortcuts && <ShortcutsOverlay onClose={() => setShowShortcuts(false)} />}
@@ -4054,7 +4461,7 @@ function ModeBadge({ mode }) {
 const SHORTCUT_SECTIONS = [
   { title: 'Tools (digits)', rows: [
     ['1', 'Select'], ['2', 'Move / pan'], ['4', 'Arrow tool'],
-    ['7', 'Draw'], ['8', 'Eraser'], ['9', 'Lasso (loop-select ink and nodes)'],
+    ['7', 'Draw'], ['8', 'Eraser'], ['9', 'Select: rectangle ⇄ lasso'],
     ['3 → Space', 'arm Node, then Space to drop one'],
     ['5 → Space', 'arm Region'],
     ['6 then 1–5', 'arm Figure: 1 rect · 2 square · 3 circle · 4 ellipse · 5 triangle → Space'],
@@ -4063,7 +4470,8 @@ const SHORTCUT_SECTIONS = [
     ['Stylus', 'draws / erases / selects with the current tool (pressure-sensitive)'],
     ['1 finger', 'pan · tap to select · drag an object to move it'],
     ['2 fingers', 'pinch to zoom, drag to pan'],
-    ['2-finger tap', 'eraser ⇄ last tool'],
+    ['Double tap', 'eraser ⇄ last tool'],
+    ['2-finger tap / 3-finger tap', 'undo / redo'],
     ['Long press', 'pen options (colour, width, opacity)'],
   ]},
   { title: 'Modes (Vim-style)', rows: [

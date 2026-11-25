@@ -136,6 +136,7 @@ function generateStyles() {
 .catego-root .toolbar-btn.props-toggle { position: absolute; top: 44px; left: 12px; }
 .catego-root .mode-badge { position: absolute; top: auto; bottom: 12px; right: 14px; }
 .catego-root .toolbar.toolbar-functions.toolbar-functions { top: 44px; right: 12px; }
+.catego-root .page-panel { top: 136px; }
 `;
   // KaTeX stylesheet with its woff2 fonts inlined as data URIs, so LaTeX renders
   // self-contained inside the pane (relative font url()s can't resolve there).

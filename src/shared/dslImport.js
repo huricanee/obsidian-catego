@@ -113,6 +113,7 @@ export function buildGraphFromDsl(text, genId, origin = { x: 0, y: 0 }) {
     centre[n.id] = { x: x + w / 2, y: y + h / 2 };
     const node = { id: cid, x, y, width: w, height: h, text: n.text, color: n.color || '#cf7bf0' };
     if (n.shape) node.shape = n.shape;
+    if (n.image) node.image = n.image;
     if (n.kind) node.kind = n.kind;
     if (n.status) node.status = n.status;
     if (n.negated) node.negated = true;

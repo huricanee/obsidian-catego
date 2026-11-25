@@ -1,15 +1,22 @@
-import { TextFileView, WorkspaceLeaf, TFile, Notice } from 'obsidian';
+import { TextFileView, WorkspaceLeaf, TFile, Notice, loadPdfJs, normalizePath } from 'obsidian';
 import { createElement } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 // @ts-ignore — the shared board editor (same component the web app renders)
 import Board from './shared/Board.jsx';
 import { CategoBoard, parseBoard, serializeBoard, emptyBoard } from './format';
+// @ts-ignore — pure ESM logic shared with the web app and the CLI
+import { parseAgentFile, AGENT_FILE_SUFFIX } from './shared/agentOps.js';
+
+const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif']);
 
 export const VIEW_TYPE_CATEGO = 'catego-view';
 
 interface Bridge {
   addNoteNodeAtScreen?: (path: string, title: string, clientX: number, clientY: number) => void;
   renameNote?: (oldPath: string, newPath: string, newTitle: string) => void;
+  importPdfSrc?: (src: string) => Promise<void>;
+  addImageSrc?: (src: string, clientX?: number, clientY?: number) => void;
+  applyAgentOps?: (ops: any[], done: string[]) => string[];
 }
 
 /**
@@ -21,6 +28,34 @@ export class CategoView extends TextFileView {
   private root: Root | null = null;
   private reload = 0;
   private bridge: Bridge = {};
+  private agentMtime = 0;
+
+  // Where the board's pictures and PDFs live: ordinary vault files, referenced
+  // by vault path (so they sync, back up and open like any attachment).
+  private assets = {
+    save: async (blob: Blob, name: string): Promise<string> => {
+      const safe = (name || 'file').replace(/[\\/:*?"<>|#^[\]]/g, '_');
+      const path = await this.app.fileManager.getAvailablePathForAttachment(safe, this.file?.path);
+      await this.app.vault.createBinary(path, await blob.arrayBuffer());
+      return path;
+    },
+    url: async (src: string): Promise<string | null> => {
+      const f = this.assetFile(src);
+      return f ? this.app.vault.getResourcePath(f) : null;
+    },
+    data: async (src: string): Promise<ArrayBuffer | null> => {
+      const f = this.assetFile(src);
+      return f ? this.app.vault.readBinary(f) : null;
+    },
+  };
+  private pdfJs = () => loadPdfJs();
+
+  private assetFile(src: string): TFile | null {
+    const direct = this.app.vault.getAbstractFileByPath(normalizePath(src));
+    if (direct instanceof TFile) return direct;
+    const linked = this.app.metadataCache.getFirstLinkpathDest(src, this.file?.path ?? '');
+    return linked instanceof TFile ? linked : null;
+  }
 
   constructor(leaf: WorkspaceLeaf, private prefs: { get(k: string): string | null; set(k: string, v: string): void }) { super(leaf); }
 
@@ -34,6 +69,8 @@ export class CategoView extends TextFileView {
     this.board = data.trim() ? parseBoard(data) : emptyBoard();
     this.reload += 1;
     this.renderBoard();
+    this.agentMtime = 0;
+    window.setTimeout(() => this.syncAgent(), 400);
   }
 
   clear() { this.board = emptyBoard(); }
@@ -47,6 +84,11 @@ export class CategoView extends TextFileView {
     this.registerDomEvent(this.contentEl, 'drop', (e) => this.onDrop(e));
     // Keep note-node titles/links in sync when a note is renamed/moved.
     this.registerEvent(this.app.vault.on('rename', (f, oldPath) => this.onVaultRename(f, oldPath)));
+    // Agent inbox (see src/agentOps.js): apply what an AI wrote next to the board.
+    const inboxChanged = (f: any) => { if (f && f.path === this.agentPath()) this.syncAgent(); };
+    this.registerEvent(this.app.vault.on('modify', inboxChanged));
+    this.registerEvent(this.app.vault.on('create', inboxChanged));
+    this.registerInterval(window.setInterval(() => this.syncAgent(), 5000));
     this.renderBoard();
   }
 
@@ -66,6 +108,8 @@ export class CategoView extends TextFileView {
         bridge: this.bridge,
         isolateKeys: true,
         prefs: this.prefs,
+        assets: this.assets,
+        loadPdfJs: this.pdfJs,
       }),
     );
   }
@@ -92,6 +136,42 @@ export class CategoView extends TextFileView {
     this.requestSave();
   }
 
+  // --- agent inbox -----------------------------------------------------------
+  // `Name.agent.json` next to `Name.catego`: the only file an AI writes. This
+  // view is the only writer of the board file, so sync never sees two writers.
+  private agentPath(): string | null {
+    return this.file ? this.file.path.replace(/\.catego$/i, '') + AGENT_FILE_SUFFIX : null;
+  }
+
+  private async syncAgent() {
+    const path = this.agentPath();
+    if (!path || !this.bridge.applyAgentOps) return;
+    try {
+      const adapter = this.app.vault.adapter;
+      const stat = await adapter.stat(path);
+      if (!stat || stat.mtime === this.agentMtime) return;
+      const ops = parseAgentFile(await adapter.read(path));
+      const done = this.board.agentApplied || [];
+      const seen = new Set(done);
+      const pending = ops.filter((o: any) => !seen.has(o.id));
+      if (pending.length) {
+        const applied = this.bridge.applyAgentOps(pending, done);
+        if (applied.length) {
+          // Saved together with the objects by the board's next persist().
+          this.board.agentApplied = [...done, ...applied];
+          new Notice(`Catego: ${applied.length} change${applied.length === 1 ? '' : 's'} from the assistant`);
+        }
+      }
+      this.agentMtime = stat.mtime;
+    } catch { /* no inbox, or unreadable — try again later */ }
+  }
+
+  /** Vault PDF → sheets of this board (retries while the editor mounts). */
+  importPdf(path: string, tries = 20) {
+    if (this.bridge.importPdfSrc) { this.bridge.importPdfSrc(path); return; }
+    if (tries > 0) window.setTimeout(() => this.importPdf(path, tries - 1), 150);
+  }
+
   // The file currently being dragged (Obsidian sets this on internal drags).
   // Any vault file can become a node — .md notes, PDFs, images, audio, other
   // boards — except this board itself.
@@ -107,6 +187,8 @@ export class CategoView extends TextFileView {
     const f = this.draggedFile();
     if (!f) return;
     e.preventDefault();
+    // A picture is shown as a picture; anything else becomes a node linking to it.
+    if (IMAGE_EXT.has(f.extension.toLowerCase()) && this.bridge.addImageSrc) { this.bridge.addImageSrc(f.path, e.clientX, e.clientY); return; }
     this.bridge.addNoteNodeAtScreen?.(f.path, f.basename, e.clientX, e.clientY);
   }
 
@@ -119,6 +201,12 @@ export class CategoView extends TextFileView {
 
   private onVaultRename(file: any, oldPath: string) {
     if (!(file instanceof TFile)) return;
+    // The board itself moved: take its agent inbox along.
+    if (this.file && file.path === this.file.path && /\.catego$/i.test(oldPath)) {
+      const from = oldPath.replace(/\.catego$/i, '') + AGENT_FILE_SUFFIX;
+      const to = this.agentPath();
+      if (to) this.app.vault.adapter.exists(from).then((yes) => (yes ? this.app.vault.adapter.rename(from, to) : undefined)).catch(() => {});
+    }
     if (this.bridge.renameNote) this.bridge.renameNote(oldPath, file.path, file.basename);
   }
 

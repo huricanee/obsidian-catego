@@ -13,6 +13,7 @@
  *                                            operator's id — nesting = parentheses)
  *   REGION id = region(x1, y1, x2, y2 [, #color] [, fill] [, "name"])   (fill = tinted inside; default outline only)
  *   FIGURE id = shape(x, y, w, h [, #color])   shape = rect|square|circle|ellipse|triangle
+ *   IMAGE  id = image(x, y, w, h, "src")        a picture; src = the asset it shows
  *   PAGES  doc = pages(paper [, ruling] [, x, y])   board setup: a paged document instead of an
  *          doc = pages(none)                        infinite canvas. paper = a4|a4l|letter|wide,
  *                                                   ruling = blank|ruled|grid|dots, x,y = first sheet's corner
@@ -66,7 +67,7 @@ const OPERATOR_ALIAS = {
 };
 
 // Figure function names (a figure is a node with a `shape` field).
-const SHAPE_NAMES = new Set(['rect', 'square', 'circle', 'ellipse', 'triangle']);
+const SHAPE_NAMES = new Set(['rect', 'square', 'circle', 'ellipse', 'triangle', 'image']);
 
 const ID = '[A-Za-z0-9_]+';
 // `id = fn( args )` — operator or region assignment.
@@ -175,6 +176,11 @@ export function parseDsl(text) {
         node.x = x; node.y = y; node.w = w; node.h = h; // figure sizes are pixels
         const color = args.slice(4).find((a) => /^#[0-9a-fA-F]{3,8}$/.test(a));
         if (color) node.color = color;
+        // image(x, y, w, h, "src") — a picture; src is the asset it shows.
+        if (fn === 'image') {
+          const src = args.slice(4).find((a) => /^".*"$/.test(a));
+          if (src) node.image = unquote(src);
+        }
         return;
       }
 

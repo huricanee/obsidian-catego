@@ -27,7 +27,7 @@ import {
   snapAngle,
   notSideFor,
   notStripPath,
-  gelStrokePath,
+  inkPaths,
 } from './Canvas.jsx';
 import { NODE_KINDS, EDGE_KINDS, NODE_STATUSES, FONT_FAMILIES } from './argTypes.js';
 
@@ -280,7 +280,7 @@ function renderRegion(r) {
 /* ----------------------------------------------------------------
    Per-node SVG
    ---------------------------------------------------------------- */
-function renderNode(n, theme) {
+function renderNode(n, theme, images) {
   const { w, h } = nodeDims(n);
   const kindDef = n.kind ? NODE_KINDS[n.kind] : null;
   const parts = [];
@@ -299,7 +299,12 @@ function renderNode(n, theme) {
     // Figure: rectangle / square / circle / triangle.
     const color = n.color || theme.nodeBorder;
     const fill = `${color}1f`;
-    if (n.shape === 'rect' || n.shape === 'square') {
+    if (n.shape === 'image') {
+      // A picture: embedded when the caller resolved it, a labelled frame otherwise.
+      const href = images && images[n.image];
+      if (href) parts.push(`<image x="${n.x}" y="${n.y}" width="${w}" height="${h}" preserveAspectRatio="xMidYMid meet" href="${esc(href)}"/>`);
+      else parts.push(`<rect x="${n.x}" y="${n.y}" width="${w}" height="${h}" fill="none" stroke="${theme.nodeBorder}" stroke-width="1" stroke-dasharray="6 4"/>`);
+    } else if (n.shape === 'rect' || n.shape === 'square') {
       parts.push(`<rect x="${n.x}" y="${n.y}" width="${w}" height="${h}" rx="4" ry="4" fill="${fill}" stroke="${color}" stroke-width="2"/>`);
     } else if (n.shape === 'circle' || n.shape === 'ellipse') {
       parts.push(`<ellipse cx="${n.x + w / 2}" cy="${n.y + h / 2}" rx="${w / 2 - 1}" ry="${h / 2 - 1}" fill="${fill}" stroke="${color}" stroke-width="2"/>`);
@@ -551,8 +556,11 @@ function flipLightness(hex) {
 }
 
 function renderStrokes(strokes, light) {
-  return (strokes || []).map((st) => {
-    const d = gelStrokePath(st.points, st.width, st.shape, st.sl, st.hl);
+  // Highlighter under the ink, as on screen.
+  const all = strokes || [];
+  const ordered = all.some((st) => st.hl) ? [...all.filter((st) => st.hl), ...all.filter((st) => !st.hl)] : all;
+  return ordered.map((st) => {
+    const d = inkPaths(st).outline;
     if (!d) return '';
     const color = light ? flipLightness(st.color || '#cf7bf0') : (st.color || '#cf7bf0');
     const op = (st.opacity == null ? 100 : st.opacity) / 100;
@@ -582,14 +590,17 @@ function renderPaper(rect, bg, light) {
 
    `options.rect` { x, y, w, h } → export exactly that world rectangle
    (one sheet of a paged document); `options.paper` = its ruling.
+   `options.light` forces the theme; `options.transparent` leaves out the
+   background and paper (the caller paints its own — a PDF page);
+   `options.images` = { src: data URL } for picture nodes.
 
    `options.viewportOnly` (default true) → export the world-coords
    rectangle that's currently visible on screen, so the user gets a
    "screenshot of what they see", not the whole infinite board.
    ---------------------------------------------------------------- */
 export function buildExportSvg(state, options = {}) {
-  const light = typeof document !== 'undefined' &&
-                document.body.classList.contains('light-theme');
+  const light = options.light != null ? !!options.light
+    : (typeof document !== 'undefined' && document.body.classList.contains('light-theme'));
   const theme = getTheme(light);
   const viewportOnly = options.viewportOnly !== false;
 
@@ -615,7 +626,7 @@ export function buildExportSvg(state, options = {}) {
     .map(r => renderRegion(r))
     .join('');
   const nodeSvg = Object.values(state.nodes || {})
-    .map(n => renderNode(n, theme))
+    .map(n => renderNode(n, theme, options.images))
     .join('');
   const arrowSvg = Object.values(state.arrows || {})
     .map(a => renderArrow(a, state, theme))
@@ -638,8 +649,8 @@ export function buildExportSvg(state, options = {}) {
     `<svg xmlns="http://www.w3.org/2000/svg" ` +
       `width="${outW}" height="${outH}" ` +
       `viewBox="${bb.x} ${bb.y} ${bb.w} ${bb.h}">` +
-      `<rect x="${bb.x}" y="${bb.y}" width="${bb.w}" height="${bb.h}" fill="${theme.bg}"/>` +
-      (options.rect && options.paper ? renderPaper(bb, options.paper, light) : '') +
+      (options.transparent ? '' : `<rect x="${bb.x}" y="${bb.y}" width="${bb.w}" height="${bb.h}" fill="${theme.bg}"/>`) +
+      (options.rect && options.paper && !options.transparent ? renderPaper(bb, options.paper, light) : '') +
       // Z-order matches on-screen: regions (back) → arrows → nodes → ink (front)
       `<g>${regionSvg}</g>` +
       `<g>${arrowSvg}</g>` +
@@ -686,5 +697,24 @@ export async function svgToCanvas(svg, pixelRatio = 2) {
   const ctx = canvas.getContext('2d');
   ctx.setTransform(effectiveRatio, 0, 0, effectiveRatio, 0, 0);
   ctx.drawImage(img, 0, 0, w, h);
+  return canvas;
+}
+
+/* ----------------------------------------------------------------
+   Public: the dark-theme look of a raster (the same lightness inversion the
+   app's themes are apart by: invert, then rotate the hue back).
+   ---------------------------------------------------------------- */
+export function invertCanvas(canvas) {
+  const ctx = canvas.getContext('2d');
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = 255 - d[i], g = 255 - d[i + 1], b = 255 - d[i + 2];
+    // hue-rotate(180deg) matrix
+    d[i] = Math.max(0, Math.min(255, -0.574 * r + 1.430 * g + 0.144 * b));
+    d[i + 1] = Math.max(0, Math.min(255, 0.426 * r + 0.430 * g + 0.144 * b));
+    d[i + 2] = Math.max(0, Math.min(255, 0.426 * r + 1.430 * g - 0.856 * b));
+  }
+  ctx.putImageData(img, 0, 0);
   return canvas;
 }

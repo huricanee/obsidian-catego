@@ -6,6 +6,7 @@ import { renderRichToHtml } from './richtext.js';
 import { NODE_KINDS, EDGE_KINDS, NODE_STATUSES, FONT_FAMILIES } from './argTypes.js';
 import { clampViewport, boxOfStroke } from './pages.js';
 import { recognizeShape } from './shapeSnap.js';
+import PageBg, { AssetImg } from './PageBg.jsx';
 
 export const GRID_SIZE = 20;
 export const MIN_ZOOM = 0.1;
@@ -437,6 +438,7 @@ let activePenPos = null;
 let activeTouchInput = false;
 const STREAMLINE_PRECISE = 0.2; // pen / touch (Excalidraw's DEFAULT_STROKE_STREAMLINE_PRECISE)
 const STREAMLINE_MOUSE = 0.5;
+const STREAMLINE_PEN = 0.3; // real-pressure stylus: a little more, with steadyPen()
 const SHIFT_LOCK_ANGLE = Math.PI / 12; // 15° steps while Shift is held
 // Stored ink is rounded to 1/100 px: invisible, and it keeps a page of
 // handwriting from being megabytes of float noise in the file.
@@ -478,6 +480,27 @@ const modsOf = (e) => ({ lock: !!e.shiftKey, free: !!(e.metaKey || e.ctrlKey) })
 // and scaled back: the bridge shrinks to 3 / INK_SCALE px. (Everything else in
 // the library is relative to `size`, which is scaled along.)
 const INK_SCALE = 20;
+// A touch of stabilisation for stylus strokes — just enough to take the grain
+// off: sensor jitter in position (one [1 2 1]/4 pass; the ends stay put) and
+// in pressure (5-sample mean — sample-to-sample pressure noise is what makes
+// the edge of a stroke look rough). Applied when the outline is built; the
+// stored points stay raw.
+function steadyPen(points) {
+  const n = points.length;
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = points[i];
+    let x = p.x, y = p.y;
+    if (i > 0 && i < n - 1) {
+      x = (points[i - 1].x + 2 * p.x + points[i + 1].x) / 4;
+      y = (points[i - 1].y + 2 * p.y + points[i + 1].y) / 4;
+    }
+    let sum = 0, cnt = 0;
+    for (let j = Math.max(0, i - 2); j <= Math.min(n - 1, i + 2); j++) { sum += points[j].p == null ? 0.5 : points[j].p; cnt++; }
+    out[i] = { x, y, p: sum / cnt };
+  }
+  return out;
+}
 export function gelStrokePath(points, width, shape, streamline, flat) {
   if (!points || points.length === 0) return '';
   const K = INK_SCALE;
@@ -493,7 +516,7 @@ export function gelStrokePath(points, width, shape, streamline, flat) {
   // Points recorded from a stylus carry real pressure (`p`); everything else
   // gets pressure simulated from speed.
   const real = points[0].p != null;
-  const scaled = getStroke(real ? points.map((p) => [p.x * K, p.y * K, p.p == null ? 0.5 : p.p]) : points.map((p) => [p.x * K, p.y * K]), {
+  const scaled = getStroke(real ? steadyPen(points).map((p) => [p.x * K, p.y * K, p.p]) : points.map((p) => [p.x * K, p.y * K]), {
     // `size` is the brush diameter in px — keep it ~1:1 with the stored
     // width so strokes match the old line weight (no 3× fattening).
     size: Math.max(0.6, width || 4) * K,
@@ -502,7 +525,7 @@ export function gelStrokePath(points, width, shape, streamline, flat) {
     // Streamline drags every point toward the previous one. Fine for a mouse;
     // from a pen or a finger it rounds off small handwriting, so those strokes
     // carry a light value (stored per stroke, as Excalidraw does).
-    streamline: real ? STREAMLINE_PRECISE : (streamline || STREAMLINE_MOUSE),
+    streamline: real ? STREAMLINE_PEN : (streamline || STREAMLINE_MOUSE),
     ...(real ? { easing: (t) => Math.sin((t * Math.PI) / 2) } : {}),
     simulatePressure: !real,
     last: true,
@@ -592,12 +615,12 @@ function arrowHitsCircle(arrow, nodes, cx, cy, radius, heightMap) {
    Utility: pixel erase - split strokes around erased points
    ================================================================ */
 let pixelEraseSeq = 0;
-function pixelEraseStrokes(strokes, cx, cy, radius) {
+function pixelEraseStrokes(strokes, cx, cy, radius, allow) {
   let changed = false;
   const result = [];
 
   for (const stroke of strokes) {
-    if (!stroke.points || stroke.points.length === 0 || strokeFarFrom(stroke, cx, cy, radius)) {
+    if (!stroke.points || stroke.points.length === 0 || (allow && !allow(stroke)) || strokeFarFrom(stroke, cx, cy, radius)) {
       result.push(stroke);
       continue;
     }
@@ -643,6 +666,8 @@ function pixelEraseStrokes(strokes, cx, cy, radius) {
         color: stroke.color,
         width: stroke.width,
         ...(stroke.opacity != null ? { opacity: stroke.opacity } : {}),
+        ...(stroke.hl ? { hl: true } : {}),
+        ...(stroke.sl != null ? { sl: stroke.sl } : {}),
       });
     }
   }
@@ -735,7 +760,7 @@ function lassoSelect(poly, nodes, arrows, strokes, heightMap) {
        stroke (or its selection state) changes.
    ================================================================ */
 const inkPathCache = new WeakMap();
-function inkPaths(stroke) {
+export function inkPaths(stroke) {
   let c = inkPathCache.get(stroke);
   if (!c) {
     c = { outline: gelStrokePath(stroke.points, stroke.width, stroke.shape, stroke.sl, stroke.hl), hit: pointsToPath(stroke.points) };
@@ -843,12 +868,25 @@ export default function Canvas({
   docLayout = null,
   // Finger gestures (touch screens): two-finger tap, long press on empty space.
   onTwoFingerTap,
+  onThreeFingerTap,
+  onDoubleTap,
   onFingerLongPress,
+  // Select tool draws a free loop (lasso) instead of a rectangle.
+  selectFree = false,
   // Alt-drag on a node / stroke: duplicate it (or the selection it belongs
   // to) in place and select the copies; the drag then moves them.
   onAltDuplicate,
   // Lasso tool finished; `found` = something got selected.
   onLassoEnd,
+  // Eraser target: 'all' | 'ink' (pen + highlighter) | 'pen' | 'hl'.
+  eraserTarget = 'all',
+  // Pen strokes start as straight lines (highlighter "straight" option).
+  drawStraight = false,
+  // Board assets (images) and the PDF service for sheet backgrounds.
+  assets = null,
+  pdf = null,
+  // "Add space" tool: (y0, dy) — everything below world-y y0 moves by dy.
+  onAddSpace,
 }) {
   const rootRef = useRef(null);
   const transformRef = useRef(null);
@@ -887,8 +925,8 @@ export default function Canvas({
     }
     return vp;
   }, [clampVp]);
-  const gestureRef = useRef({ onTwoFingerTap, onFingerLongPress });
-  useEffect(() => { gestureRef.current = { onTwoFingerTap, onFingerLongPress }; }, [onTwoFingerTap, onFingerLongPress]);
+  const gestureRef = useRef({ onTwoFingerTap, onThreeFingerTap, onDoubleTap, onFingerLongPress });
+  useEffect(() => { gestureRef.current = { onTwoFingerTap, onThreeFingerTap, onDoubleTap, onFingerLongPress }; }, [onTwoFingerTap, onThreeFingerTap, onDoubleTap, onFingerLongPress]);
 
   /* ---- node height state for anchor position computation (state, not ref, so render can read it) ---- */
   const [nodeHeightMap, setNodeHeightMap] = useState({});
@@ -1010,8 +1048,21 @@ export default function Canvas({
   // would collide as React keys).
   const uniqueStrokes = useMemo(() => {
     const seen = new Set();
-    return (drawStrokes || []).filter((st) => (seen.has(st.id) ? false : (seen.add(st.id), true)));
+    const uniq = (drawStrokes || []).filter((st) => (seen.has(st.id) ? false : (seen.add(st.id), true)));
+    // Highlighter sits UNDER the ink, whatever was drawn first.
+    if (!uniq.some((st) => st.hl)) return uniq;
+    return [...uniq.filter((st) => st.hl), ...uniq.filter((st) => !st.hl)];
   }, [drawStrokes]);
+  const spaceBandRef = useRef(null);
+  const paintSpaceBand = (y0, dy) => {
+    const el = spaceBandRef.current;
+    if (!el) return;
+    if (y0 == null) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    el.style.top = Math.min(y0, y0 + dy) + 'px';
+    el.style.height = Math.abs(dy) + 'px';
+    el.classList.toggle('closing', dy < 0);
+  };
   // Click / drag on a stroke in Select mode. Kept in a ref behind a stable
   // callback so the memoised stroke elements don't re-render with the canvas.
   const strokeDown = (e, strokeId) => {
@@ -1148,6 +1199,7 @@ export default function Canvas({
     }
     const inPalmWindow = () => penIsDown || (penSeen && Date.now() - lastPenT < PALM_GUARD_MS);
     let lastTap = null;  // { t, x, y } — for double-tap → dblclick
+    let lastBgTap = null; // finger taps on empty space — for the double-tap gesture
 
     const isStylus = (t) => t.touchType === 'stylus';
     const isBackground = (target) => target === el
@@ -1231,7 +1283,7 @@ export default function Canvas({
       // resting hand: it may still scroll, but only after a decisive move, and
       // it never counts as a long press.
       const guard = penSeen && Date.now() - lastPenT < PALM_GUARD_MS;
-      g = { type: 'pan', id: t.identifier, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY, t0: Date.now(), moved: false, maxTouches: 1, longTimer: null, guard, vp0: { ...vpRef.current }, trail: [] };
+      g = { type: 'pan', id: t.identifier, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY, t0: Date.now(), moved: false, maxTouches: 1, longTimer: null, guard, vp0: { ...vpRef.current }, trail: [{ x: t.clientX, y: t.clientY, t: performance.now() }] };
       if (guard) return;
       const mine = g;
       g.longTimer = setTimeout(() => {
@@ -1301,6 +1353,7 @@ export default function Canvas({
           if (first) startPinch(first, t, from);
         } else if (g.type === 'pinch') {
           g.maxTouches = Math.max(g.maxTouches, e.touches.length);
+          g.t0 = g.t0 || Date.now();
         }
       }
     }
@@ -1321,14 +1374,16 @@ export default function Canvas({
       } else if (g.type === 'pan') {
         const t = find(e.touches, g.id);
         if (!t) return;
+        // Velocity samples start with the very first move, so a short flick
+        // still has a speed to glide with.
+        const nowT = performance.now();
+        g.trail.push({ x: t.clientX, y: t.clientY, t: nowT });
+        while (g.trail.length > 2 && nowT - g.trail[0].t > 90) g.trail.shift();
         if (!g.moved && Math.hypot(t.clientX - g.startX, t.clientY - g.startY) < (g.guard ? TAP_MOVE * 2 : TAP_MOVE / 2)) return;
         if (!g.moved) { g.moved = true; clearLong(); g.lastX = t.clientX; g.lastY = t.clientY; return; }
         const vp = vpRef.current;
         writeVp({ ...vp, panX: vp.panX + (t.clientX - g.lastX), panY: vp.panY + (t.clientY - g.lastY) });
         g.lastX = t.clientX; g.lastY = t.clientY;
-        const nowT = performance.now();
-        g.trail.push({ x: t.clientX, y: t.clientY, t: nowT });
-        while (g.trail.length > 2 && nowT - g.trail[0].t > 90) g.trail.shift();
       } else if (g.type === 'pinch') {
         const a = find(e.touches, g.ids[0]), b = find(e.touches, g.ids[1]);
         if (!a || !b) return;
@@ -1368,12 +1423,20 @@ export default function Canvas({
         if (done.moved && !cancelled && done.trail.length >= 2) {
           const a = done.trail[0], b = done.trail[done.trail.length - 1];
           const dt = b.t - a.t;
-          const fresh = performance.now() - b.t < 60; // the finger was still moving when it left
+          const fresh = performance.now() - b.t < 90; // the finger was still moving when it left
           const vx = dt > 0 ? (b.x - a.x) / dt : 0, vy = dt > 0 ? (b.y - a.y) / dt : 0;
-          if (fresh && Math.hypot(vx, vy) > 0.25) { startGlide(vx, vy); return; }
+          if (fresh && Math.hypot(vx, vy) > 0.12) { startGlide(vx, vy); return; }
         }
         if (done.moved || cancelled) { commitVp(); return; }
         if (done.guard) return;
+        // Two quick taps: eraser ⇄ last tool.
+        const nowTap = Date.now();
+        if (lastBgTap && nowTap - lastBgTap.t < 300 && Math.hypot(t.clientX - lastBgTap.x, t.clientY - lastBgTap.y) < 35) {
+          lastBgTap = null;
+          gestureRef.current.onDoubleTap?.();
+          return;
+        }
+        lastBgTap = { t: nowTap, x: t.clientX, y: t.clientY };
         // A finger tap on empty space is a click there (deselects) — except
         // with a drawing tool, where a click would start a stroke.
         const tool = toolModeRef.current;
@@ -1384,8 +1447,11 @@ export default function Canvas({
         if (e.touches.length >= 2 && find(e.touches, g.ids[0]) && find(e.touches, g.ids[1])) return;
         const done = g;
         g = null;
-        if (!done.moved && !cancelled && !done.guard && done.maxTouches === 2 && Date.now() - done.t0 < TAP_MS) {
-          gestureRef.current.onTwoFingerTap?.();
+        if (!done.moved && !cancelled && !done.guard && Date.now() - done.t0 < TAP_MS && (done.maxTouches === 2 || done.maxTouches === 3)) {
+          if (done.maxTouches === 3) gestureRef.current.onThreeFingerTap?.();
+          else gestureRef.current.onTwoFingerTap?.();
+          // The remaining fingers of this tap are lifting too — not a new gesture.
+          return;
         } else {
           commitVp();
         }
@@ -1930,6 +1996,10 @@ export default function Canvas({
   useEffect(() => { toolModeRef.current = toolMode; }, [toolMode]);
   const eraserModeRef = useRef(eraserMode);
   useEffect(() => { eraserModeRef.current = eraserMode; }, [eraserMode]);
+  const eraserTargetRef = useRef(eraserTarget);
+  useEffect(() => { eraserTargetRef.current = eraserTarget; }, [eraserTarget]);
+  const onAddSpaceRef = useRef(onAddSpace);
+  useEffect(() => { onAddSpaceRef.current = onAddSpace; }, [onAddSpace]);
   const eraserRadiusRef = useRef(eraserRadius);
   useEffect(() => { eraserRadiusRef.current = eraserRadius; }, [eraserRadius]);
   const drawStrokesRef = useRef(drawStrokes);
@@ -1975,6 +2045,15 @@ export default function Canvas({
       return;
     }
 
+    if (toolMode === 'space') {
+      // Add space: drag down from here to push everything below further down
+      // (drag up to close a gap).
+      e.preventDefault();
+      dragState.current = { type: 'space', y0: snap(world.y), dy: 0 };
+      paintSpaceBand(snap(world.y), 0);
+      return;
+    }
+
     if (toolMode === 'arrow') {
       // Free-floating arrow: drag from this empty point to another.
       e.preventDefault();
@@ -1994,10 +2073,10 @@ export default function Canvas({
     if (toolMode === 'draw') {
       // Start freehand drawing
       e.preventDefault();
-      currentStroke.current = { points: [penPoint(world.x, world.y)], color: drawColor || '#cf7bf0', width: drawWidth || 2, opacity: drawOpacity == null ? 100 : drawOpacity, ...(activeTouchInput && activePenPressure == null ? { sl: STREAMLINE_PRECISE } : {}), ...(drawFlat ? { hl: true } : {}) };
+      currentStroke.current = { points: [penPoint(world.x, world.y)], color: drawColor || '#cf7bf0', width: drawWidth || 2, opacity: drawOpacity == null ? 100 : drawOpacity, ...(activeTouchInput && activePenPressure == null ? { sl: STREAMLINE_PRECISE } : {}), ...(drawFlat ? { hl: true } : {}), ...(drawStraight ? { shape: 'line' } : {}) };
       dragState.current = { type: 'draw' };
       touchHold(e.clientX, e.clientY);
-      setDrawingPreview(gelStrokePath(currentStroke.current.points, currentStroke.current.width, null, currentStroke.current.sl, currentStroke.current.hl));
+      setDrawingPreview(gelStrokePath(currentStroke.current.points, currentStroke.current.width, currentStroke.current.shape, currentStroke.current.sl, currentStroke.current.hl));
       return;
     }
 
@@ -2047,6 +2126,12 @@ export default function Canvas({
       onSelect(null, null);
       onSelectionChange({ nodeIds: new Set(), arrowIds: new Set(), strokeIds: new Set() });
 
+      if (selectFree) { // lasso
+        e.preventDefault();
+        dragState.current = { type: 'lasso', points: [world] };
+        return;
+      }
+
       // Start rectangle selection
       e.preventDefault();
       dragState.current = {
@@ -2059,7 +2144,7 @@ export default function Canvas({
       };
       return;
     }
-  }, [onSelect, toolMode, drawColor, drawWidth, drawOpacity, drawFlat, screenToWorld, onSelectionChange, selection]);
+  }, [onSelect, toolMode, drawColor, drawWidth, drawOpacity, drawFlat, drawStraight, screenToWorld, onSelectionChange, selection, selectFree]);
 
   /* ================================================================
      Eraser perform helper
@@ -2068,6 +2153,8 @@ export default function Canvas({
     // Convert screen-pixel radius to world units
     const radius = eraserRadiusRef.current / vpRef.current.zoom;
     const mode = eraserModeRef.current;
+    const target = eraserTargetRef.current;
+    const inkOk = (st) => target === 'all' || target === 'ink' || (target === 'hl' ? !!st.hl : !st.hl);
 
     if (mode === 'object') {
       const currentNodes = nodesRef.current;
@@ -2079,18 +2166,20 @@ export default function Canvas({
       const hitArrowIds = [];
       const hitStrokeIds = [];
 
-      for (const node of Object.values(currentNodes)) {
-        if (nodeHitsCircle(node, wx, wy, radius, hm)) {
-          hitNodeIds.push(node.id);
+      if (target === 'all') {
+        for (const node of Object.values(currentNodes)) {
+          if (nodeHitsCircle(node, wx, wy, radius, hm)) {
+            hitNodeIds.push(node.id);
+          }
         }
-      }
-      for (const [aId, arrow] of Object.entries(currentArrows)) {
-        if (arrowHitsCircle(arrow, currentNodes, wx, wy, radius, hm)) {
-          hitArrowIds.push(aId);
+        for (const [aId, arrow] of Object.entries(currentArrows)) {
+          if (arrowHitsCircle(arrow, currentNodes, wx, wy, radius, hm)) {
+            hitArrowIds.push(aId);
+          }
         }
       }
       for (const stroke of currentStrokes) {
-        if (!strokeFarFrom(stroke, wx, wy, radius) && strokeHitsCircle(stroke, wx, wy, radius)) {
+        if (inkOk(stroke) && !strokeFarFrom(stroke, wx, wy, radius) && strokeHitsCircle(stroke, wx, wy, radius)) {
           hitStrokeIds.push(stroke.id);
         }
       }
@@ -2101,7 +2190,7 @@ export default function Canvas({
     } else {
       // Pixel erase
       const currentStrokes = drawStrokesRef.current || [];
-      const { strokes: newStrokes, changed } = pixelEraseStrokes(currentStrokes, wx, wy, radius);
+      const { strokes: newStrokes, changed } = pixelEraseStrokes(currentStrokes, wx, wy, radius, target === 'all' || target === 'ink' ? null : inkOk);
       if (changed) {
         onPixelErase(newStrokes);
       }
@@ -2393,6 +2482,8 @@ export default function Canvas({
       startMouseY: e.clientY,
       // Square & circle stay 1:1 while resizing.
       lockAspect: node.shape === 'square' || node.shape === 'circle',
+      // An image keeps its proportions.
+      ratio: node.shape === 'image' ? (node.width || 220) / Math.max(1, node.height || nodeHeightRef.current[nodeId] || 60) : 0,
     };
   }, [nodes]);
 
@@ -2567,6 +2658,36 @@ export default function Canvas({
           onMoveSelection(dx, dy);
           ds.appliedX = tx;
           ds.appliedY = ty;
+        }
+        return;
+      }
+
+      if (ds.type === 'space') {
+        const vp = vpRef.current;
+        ds.dy = snap((my - vp.panY) / vp.zoom) - ds.y0;
+        paintSpaceBand(ds.y0, ds.dy);
+        return;
+      }
+
+      if (ds.type === 'selRotate') {
+        // Turn the whole selection about its centre (Shift: 15° steps).
+        const vp = vpRef.current;
+        const wx = (mx - vp.panX) / vp.zoom, wy = (my - vp.panY) / vp.zoom;
+        let ang = Math.atan2(wy - ds.cy, wx - ds.cx) - ds.a0;
+        if (e.shiftKey) ang = Math.round(ang / SHIFT_LOCK_ANGLE) * SHIFT_LOCK_ANGLE;
+        if (Math.abs(ang - ds.angle) < 0.004) return;
+        ds.angle = ang;
+        const cos = Math.cos(ang), sin = Math.sin(ang);
+        const turn = (x, y) => ({ x: ds.cx + (x - ds.cx) * cos - (y - ds.cy) * sin, y: ds.cy + (x - ds.cx) * sin + (y - ds.cy) * cos });
+        // Boxes (nodes, pictures) stay upright; they travel round the centre.
+        for (const n of ds.nodes) {
+          const c = turn(n.x + n.width / 2, n.y + n.height / 2);
+          onUpdateNode(n.id, { x: snap(c.x - n.width / 2), y: snap(c.y - n.height / 2) });
+        }
+        if (onUpdateStrokeRef.current) {
+          for (const st of ds.strokes) {
+            onUpdateStrokeRef.current(st.id, { points: st.points.map((pt) => { const q = turn(pt.x, pt.y); return { ...pt, x: r2(q.x), y: r2(q.y) }; }) });
+          }
         }
         return;
       }
@@ -2894,6 +3015,13 @@ export default function Canvas({
           newY = (ds.corner === 'ne' || ds.corner === 'nw') ? farB - s : ds.startY;
         }
 
+        if (ds.ratio) {
+          const farR = ds.startX + ds.startW, farB = ds.startY + ds.startH;
+          newH = Math.max(20, Math.round(newW / ds.ratio));
+          newX = (ds.corner === 'sw' || ds.corner === 'nw') ? farR - newW : ds.startX;
+          newY = (ds.corner === 'ne' || ds.corner === 'nw') ? farB - newH : ds.startY;
+        }
+
         onUpdateNode(ds.nodeId, { x: newX, y: newY, width: newW, height: newH });
       } else if (ds.type === 'regionDrag') {
         const vp = vpRef.current;
@@ -3025,6 +3153,10 @@ export default function Canvas({
         // One undo step for the whole erasing gesture.
         if (onEraseEndRef.current) onEraseEndRef.current();
       }
+      if (ds && ds.type === 'space') {
+        paintSpaceBand(null);
+        if (ds.dy && onAddSpaceRef.current) onAddSpaceRef.current(ds.y0, ds.dy);
+      }
       if (ds && ds.type === 'rectSelect') {
         setSelectRect(null);
         // If user didn't move, it was a click on empty space -> already cleared selection
@@ -3042,7 +3174,7 @@ export default function Canvas({
         }
         onSelectionDragEnd();
       }
-      if (ds && (ds.type === 'selResize' || (ds.type === 'lineEnd' && ds.moved))) {
+      if (ds && (ds.type === 'selResize' || (ds.type === 'selRotate' && ds.angle) || (ds.type === 'lineEnd' && ds.moved))) {
         onSelectionDragEnd();
       }
       if (ds && ds.type === 'resize') {
@@ -4280,6 +4412,11 @@ export default function Canvas({
             )}
           </svg>
         )}
+        {node.shape === 'image' && node.image && (
+          <AssetImg className="node-image" src={node.image} assets={assets}
+            // A picture placed without a known size (by the AI) takes its own proportions.
+            onSize={node.fitImage ? (w, h) => { if (w && h) onUpdateNode(node.id, { height: Math.round(((node.width || 220) * h) / w), fitImage: false }); } : undefined} />
+        )}
         {kindDef && (
           <div className="node-kind-label" style={{ color: kindDef.accent }}>
             {kindDef.label}
@@ -4441,6 +4578,7 @@ export default function Canvas({
     : toolMode === 'move' ? ' move-mode'
     : toolMode === 'arrow' ? ' arrow-mode'
     : toolMode === 'lasso' ? ' lasso-mode'
+    : toolMode === 'space' ? ' space-mode'
     : (toolMode === 'node' || toolMode === 'region' || toolMode === 'figure') ? ' place-mode'
     : '';
 
@@ -4476,6 +4614,25 @@ export default function Canvas({
     };
   };
 
+  const onSelRotateMouseDown = (e) => {
+    if (e.button !== 0 || !strokeSelBounds) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const hm = nodeHeightRef.current;
+    const b = strokeSelBounds;
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    const rect = rootRef.current.getBoundingClientRect();
+    const vp = vpRef.current;
+    const wx = ((activePenPos ? activePenPos.x : e.clientX) - rect.left - vp.panX) / vp.zoom;
+    const wy = ((activePenPos ? activePenPos.y : e.clientY) - rect.top - vp.panY) / vp.zoom;
+    dragState.current = {
+      type: 'selRotate', cx, cy, a0: Math.atan2(wy - cy, wx - cx), angle: 0,
+      nodes: [...selection.nodeIds].map((id) => nodes[id]).filter(Boolean)
+        .map((n) => ({ id: n.id, x: n.x, y: n.y, width: n.width || 220, height: n.height || hm[n.id] || 60 })),
+      strokes: (drawStrokes || []).filter((st) => selection.strokeIds.has(st.id)).map((st) => ({ id: st.id, points: st.points })),
+    };
+  };
+
   return (
     <div
       ref={rootRef}
@@ -4504,8 +4661,9 @@ export default function Canvas({
         {docLayout && (
           <div className="page-layer">
             {docLayout.pages.map((pg, i) => (
-              <div key={i} className={`doc-page bg-${docLayout.bg}`}
+              <div key={i} className={`doc-page bg-${pg.bg ? 'pdf' : docLayout.bg}`}
                 style={{ left: pg.x, top: pg.y, width: pg.w, height: pg.h }}>
+                {pg.bg && <PageBg bg={pg.bg} pdf={pdf} cssWidth={pg.w} zoom={zoom} />}
                 <span className="doc-page-num">{i + 1}</span>
               </div>
             ))}
@@ -4596,9 +4754,10 @@ export default function Canvas({
         )}
 
         {/* Lasso: a hit layer above everything, so the loop can start anywhere */}
-        {toolMode === 'lasso' && (
+        {(toolMode === 'lasso' || toolMode === 'space') && (
           <div className="select-hit-layer lasso-top" />
         )}
+        <div ref={spaceBandRef} className="space-band" style={{ display: 'none' }} />
         <svg className="select-rect-layer" width="1" height="1">
           <path ref={lassoPathRef} className="lasso-path" style={{ display: 'none' }} />
         </svg>
@@ -4666,6 +4825,20 @@ export default function Canvas({
               borderWidth: 2 / zoom,
             }}
             onMouseDown={onSelResizeMouseDown}
+          />
+        )}
+        {strokeSelBounds && !selLine && toolMode === 'select' && (
+          <div
+            className="sel-resize-handle rotate"
+            title="Drag to rotate the selection (Shift: 15° steps)"
+            style={{
+              left: strokeSelBounds.x + strokeSelBounds.w / 2,
+              top: strokeSelBounds.y - 24 / zoom,
+              width: 14 / zoom, height: 14 / zoom,
+              marginLeft: -7 / zoom, marginTop: -7 / zoom,
+              borderWidth: 2 / zoom,
+            }}
+            onMouseDown={onSelRotateMouseDown}
           />
         )}
 

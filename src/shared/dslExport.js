@@ -26,6 +26,8 @@ function nodeLine(n) {
   if (n.shape) {
     const args = [Math.round(n.x), Math.round(n.y), Math.round(n.width || 0), Math.round(n.height || 0)];
     if (n.color && n.color !== DEFAULT_COLOR) args.push(n.color);
+    // A picture names its asset; an embedded one (data: URL) is only marked.
+    if (n.shape === 'image') args.push(q(String(n.image || '').startsWith('data:') ? 'data:' : (n.image || '')));
     return `${n.id} = ${n.shape}(${args.join(', ')})`;
   }
   let s = `${n.id} : `;

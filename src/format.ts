@@ -20,6 +20,8 @@ export interface CategoBoard {
   notes: Record<string, string>;
   /** Paged-document setup (src/pages.js); null/absent = infinite board. */
   doc?: any;
+  /** Ids of agent-inbox operations already applied (src/agentOps.js). */
+  agentApplied?: string[];
 }
 
 const EXTRAS_SENTINEL = '%%catego:extras';
@@ -50,6 +52,7 @@ export function serializeBoard(board: CategoBoard): string {
   const extras = {
     version: 2,
     notes: board.notes || {},
+    ...(board.agentApplied && board.agentApplied.length ? { agentApplied: board.agentApplied.slice(-2000) } : {}),
     full: {
       nodes: board.nodes || {},
       arrows: board.arrows || {},
@@ -85,6 +88,7 @@ function toNode(n: any): any {
   if (n.negated) node.negated = true;
   if (n.probability != null) node.probability = n.probability;
   if (n.shape) node.shape = n.shape;
+  if (n.image) node.image = n.image;
   return node;
 }
 
@@ -111,6 +115,7 @@ export function parseBoard(text: string): CategoBoard {
       strokes: extras.full.strokes || [],
       notes: extras.notes || {},
       doc: extras.full.doc || null,
+      agentApplied: Array.isArray(extras.agentApplied) ? extras.agentApplied : [],
     };
   }
 
@@ -149,7 +154,7 @@ export function parseBoard(text: string): CategoBoard {
     arrows[id] = arrow;
   }
 
-  return { nodes, arrows, regions, strokes: extras.strokes || [], notes: extras.notes || {}, doc: parsed.doc || null };
+  return { nodes, arrows, regions, strokes: extras.strokes || [], notes: extras.notes || {}, doc: parsed.doc || null, agentApplied: Array.isArray(extras.agentApplied) ? extras.agentApplied : [] };
 }
 
 // --- note → node ---------------------------------------------------------

@@ -76,6 +76,17 @@ export default class CategoPlugin extends Plugin {
             item.setTitle('New Catego notebook').setIcon('notebook').onClick(() =>
               this.newBoard(file.path, serializeBoard({ ...emptyBoard(), doc: makeDoc('a4', 'ruled') }), 'Notebook')),
           );
+        } else if (file instanceof TFile && file.extension.toLowerCase() === 'pdf') {
+          // A PDF becomes a notebook whose sheets are its pages, to write over.
+          menu.addItem((item) =>
+            item.setTitle('Annotate in Catego (new notebook)').setIcon('notebook').onClick(() => this.annotatePdf(file)),
+          );
+          const view = this.activeCategoView();
+          if (view) {
+            menu.addItem((item) =>
+              item.setTitle('Add PDF pages to the open Catego notebook').setIcon('file-plus').onClick(() => view.importPdf(file.path)),
+            );
+          }
         } else if (file instanceof TFile) {
           // Any file type can be added as a node (the node links to the file);
           // only adding a board to itself is excluded.
@@ -104,7 +115,15 @@ export default class CategoPlugin extends Plugin {
     return parent && parent !== '/' ? parent : '';
   }
 
-  private async newBoard(folder: string, content = '', base = 'Untitled') {
+  private async annotatePdf(pdf: TFile) {
+    const folder = pdf.parent && pdf.parent.path !== '/' ? pdf.parent.path : '';
+    const file = await this.newBoard(folder, serializeBoard({ ...emptyBoard(), doc: makeDoc('a4', 'blank') }), pdf.basename);
+    if (!file) return;
+    const view = this.app.workspace.getLeavesOfType(VIEW_TYPE_CATEGO).map((l) => l.view as CategoView).find((v) => v.file?.path === file.path);
+    if (view) view.importPdf(pdf.path);
+  }
+
+  private async newBoard(folder: string, content = '', base = 'Untitled'): Promise<TFile | null> {
     const dir = folder ? `${folder}/` : '';
     let path = `${dir}${base}.catego`;
     let i = 1;
@@ -112,8 +131,10 @@ export default class CategoPlugin extends Plugin {
     try {
       const file = await this.app.vault.create(path, content);
       await this.app.workspace.getLeaf(true).openFile(file);
+      return file;
     } catch (e: any) {
       new Notice(`Could not create board: ${e?.message ?? e}`);
+      return null;
     }
   }
 }

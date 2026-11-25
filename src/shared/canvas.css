@@ -2011,3 +2011,291 @@
 .toolbar.toolbar-functions.collapsed { flex-direction: row; }
 .toolbar.toolbar-functions.collapsed > *:not(.fn-keep) { display: none; }
 .pen-toolbar .seg-row { margin-bottom: 2px; }
+
+/* ============================================================
+   Tool options — a slim bar hanging under the tools toolbar
+   (select: rectangle / lasso · pen & highlighter · eraser).
+   ============================================================ */
+.toolbar.toolbar-tools { overflow: visible; }
+.tool-options {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  white-space: nowrap;
+  background: var(--toolbar-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.35);
+}
+.opt-sep { width: 1px; height: 18px; background: rgba(255, 255, 255, 0.12); }
+.opt-swatches { display: flex; align-items: center; gap: 7px; }
+.opt-swatch {
+  width: 18px; height: 18px; padding: 0; flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--sw);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.opt-swatch:hover { transform: scale(1.12); }
+.opt-swatch.active { box-shadow: 0 0 0 2px var(--toolbar-bg), 0 0 0 3.5px var(--sw); transform: scale(1.05); }
+.opt-slider { display: flex; align-items: center; gap: 8px; color: var(--text); }
+.opt-slider input[type="range"] { width: 92px; margin: 0; accent-color: #cf7bf0; }
+.opt-dot { flex: 0 0 auto; border-radius: 50%; }
+.opt-dot.hollow { border: 1.5px solid rgba(255, 255, 255, 0.7); }
+.opt-num { min-width: 30px; font: 600 11px/1 ui-sans-serif, system-ui, sans-serif; opacity: 0.6; text-align: right; }
+.opt-chip {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
+  color: var(--text);
+  opacity: 0.7;
+}
+.opt-chip:hover { background: rgba(255, 255, 255, 0.06); opacity: 1; }
+.opt-chip.active { background: rgba(207, 123, 240, 0.2); color: #fff; opacity: 1; }
+@media (pointer: coarse) {
+  .opt-swatch { width: 24px; height: 24px; }
+  .opt-slider input[type="range"] { width: 110px; }
+  .opt-chip { padding: 8px 12px; font-size: 13px; }
+}
+@media (max-width: 900px) {
+  .tool-options { flex-wrap: wrap; justify-content: center; border-radius: 16px; max-width: 94vw; white-space: normal; }
+}
+
+/* ============================================================
+   Pictures, PDF sheets, add-space, rotate handle
+   ============================================================ */
+.wb-node.figure-node .node-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  border-radius: 2px;
+}
+.node-image-missing,
+.page-bg-missing {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  font: 500 11px/1.3 ui-sans-serif, system-ui, sans-serif;
+  color: rgba(255, 255, 255, 0.35);
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  word-break: break-all;
+  text-align: center;
+  pointer-events: none;
+}
+/* A PDF page behind a sheet. The app's themes are one lightness inversion
+   apart, so the page is inverted in the dark theme (dark paper, light print —
+   white ink stays readable) and comes out as printed in the light theme. */
+.page-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: invert(1) hue-rotate(180deg);
+  border-radius: 3px;
+}
+.doc-page.bg-pdf { background-image: none; }
+
+.canvas-root.space-mode { cursor: row-resize; }
+.space-band {
+  position: absolute;
+  left: -100000px;
+  width: 200000px;
+  box-sizing: border-box;
+  background: rgba(207, 123, 240, 0.12);
+  border-top: 2px solid #cf7bf0;
+  border-bottom: 2px dashed #cf7bf0;
+  pointer-events: none;
+  z-index: 250;
+}
+.space-band.closing { background: rgba(255, 107, 107, 0.14); border-color: #ff6b6b; }
+
+.sel-resize-handle.rotate { cursor: grab; background: #cf7bf0; }
+
+/* ============================================================
+   Page strip (paged documents) + page indicator
+   ============================================================ */
+.page-chip {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 4px;
+  font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
+  color: var(--text);
+  background: var(--toolbar-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+.page-chip button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: inherit;
+  opacity: 0.8;
+}
+.page-chip button:hover { background: rgba(255, 255, 255, 0.07); opacity: 1; }
+.page-chip button:disabled { opacity: 0.25; }
+.page-chip .page-chip-num { font-variant-numeric: tabular-nums; }
+.page-chip.open .page-chip-num { background: rgba(207, 123, 240, 0.2); opacity: 1; }
+
+.page-panel {
+  position: absolute;
+  left: 12px;
+  top: 136px;
+  bottom: 14px;
+  width: 132px;
+  z-index: 115;
+  display: flex;
+  flex-direction: column;
+  background: var(--toolbar-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+.page-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 6px 4px 12px;
+  font: 700 11px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.page-panel-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0 10px;
+  -webkit-overflow-scrolling: touch;
+}
+.page-thumb {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border-radius: 6px;
+  flex: 0 0 auto;
+}
+.page-thumb:hover { background: rgba(255, 255, 255, 0.05); }
+.page-thumb-sheet {
+  position: relative;
+  display: block;
+  background: #111114;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.page-thumb.active .page-thumb-sheet { border-color: #cf7bf0; box-shadow: 0 0 0 1.5px #cf7bf0; }
+.page-thumb-ink { position: absolute; inset: 0; background-size: 100% 100%; background-repeat: no-repeat; }
+.page-thumb-sheet .page-bg { border-radius: 0; }
+.page-thumb-sheet .page-bg-missing { display: none; }
+.page-thumb-num { font: 600 10px/1 ui-sans-serif, system-ui, sans-serif; color: var(--text-muted); }
+.page-thumb.active .page-thumb-num { color: #cf7bf0; }
+.page-panel-ops {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2px;
+  padding: 6px;
+  border-top: 1px solid var(--border);
+}
+.page-op {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--text);
+  opacity: 0.8;
+}
+.page-op:hover { background: rgba(255, 255, 255, 0.07); opacity: 1; }
+.page-op:disabled { opacity: 0.22; }
+.page-op.danger:hover:not(:disabled) { color: #ff6b6b; }
+.page-import {
+  margin: 0 6px 6px;
+  padding: 7px 4px;
+  border-radius: 7px;
+  font: 600 11px/1 ui-sans-serif, system-ui, sans-serif;
+  color: var(--text);
+  background: rgba(207, 123, 240, 0.16);
+}
+.page-import:hover { background: rgba(207, 123, 240, 0.26); }
+@media (pointer: coarse) {
+  .page-chip button { min-width: 34px; height: 34px; }
+  .page-op { height: 36px; }
+  .page-import { padding: 10px 4px; }
+}
+
+/* Pen slots (tool options bar): three pens per kind, each keeps its settings */
+.opt-pens { display: flex; align-items: center; gap: 3px; }
+.opt-pen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 1.5px solid transparent;
+}
+.opt-pen:hover { background: rgba(255, 255, 255, 0.06); }
+.opt-pen.active { border-color: var(--sw); background: rgba(255, 255, 255, 0.07); }
+.opt-pen i { display: block; border-radius: 999px; background: var(--sw); }
+.opt-pen.hl i { border-radius: 2px; opacity: 0.75; }
+@media (pointer: coarse) { .opt-pen { width: 32px; height: 32px; } }
+
+/* Page strip owns the left edge while it is open */
+.catego-root.pages-open .props-panel,
+.catego-root.pages-open .toolbar-btn.props-toggle { display: none; }
+.busy-note {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 400;
+  padding: 12px 18px;
+  font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+  color: var(--text);
+  background: var(--toolbar-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+.opt-hint { font: 500 12px/1.2 ui-sans-serif, system-ui, sans-serif; color: var(--text-muted); padding: 2px 6px; }
+/* Pictures keep their own colours in the (inverted) light theme. */
+body.light-theme .catego-root .node-image { filter: invert(1) hue-rotate(180deg); }

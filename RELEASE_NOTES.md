@@ -1,8 +1,9 @@
-- **iPad**: toolbar buttons are their proper size (Obsidian mobile was restyling them); pressure-sensitive ink now uses sub-pixel pen positions, so small handwriting is crisp and no straight segment trails the pen tip; dots are kept.
-- **Palm protection**: while the pen writes, a resting hand can't press toolbars, scroll, zoom or switch tools. Finger scrolling has inertia.
-- **Lasso** tool (`9`): draw a loop around ink and nodes to select them.
-- **Highlighter** next to the pen; pen width from 0.5.
-- **Selection**: Delete and Duplicate buttons; `Option`-drag makes a copy; `Shift` locks a drag to one axis; a selected straight line has draggable ends.
-- **Shapes and lines**: `Shift` while drawing gives a straight line (15° steps); line ends are magnetic to the grid.
-- The right toolbar is collapsed into the top-right corner (`⋯` unfolds it). Sheets can be pulled past their first and last page. Zoom range is 0.1–8.
-- Much faster on pages with a lot of handwriting.
+- **PDF**: import a PDF and write on it — each PDF page becomes a sheet (file menu of a PDF: "Annotate in Catego"; or "Import PDF…" in the page strip). Pages are inverted in the dark theme.
+- **Pictures**: add from a file, paste or drop; stored as normal vault attachments.
+- **Pages**: page indicator with a thumbnail strip — add, duplicate, move and delete sheets.
+- **Add space** tool: drag down to push everything below, drag up to close a gap.
+- **Pen slots**: three pens and three highlighters, each remembers colour, width and opacity.
+- **Selection**: filter by ink / objects; rotate handle (`Shift` snaps to 15°).
+- **Eraser**: erase only ink, pen or highlighter; optional auto-return to the previous tool.
+- **Highlighter** is drawn under the ink and can draw straight lines.
+- **Agent inbox**: an AI assistant can add text, pictures and pages through a separate `Name.agent.json` file next to the notebook, so it never conflicts with your own writing or with sync.
