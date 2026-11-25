@@ -1,6 +1,8 @@
-- **Notebook mode**: a board can be a document made of sheets (A4, Letter, 16:10; blank, ruled, grid or dots) instead of an infinite canvas — page-setup button in the right toolbar, or the new command "Create new notebook (sheets)". PDF export is one page per sheet, and exports now include ink.
-- **Stylus and touch** (the plugin is no longer desktop-only): pressure-sensitive ink; one finger pans, two fingers zoom; a two-finger tap switches eraser ⇄ last tool; a long press opens the pen options. Once a stylus has touched the board, fingers only navigate.
-- **Shapes**: draw a rough line, rectangle or ellipse and hold still at the end — it snaps to the clean shape. Anything else stays as drawn.
-- **Selection**: a corner handle scales a group (nodes and ink), `Cmd` + `C` / `X` / `V`, a Duplicate button, ink width / opacity / colour for the selection.
-- **Properties panel** is compact: one `name: value` line per property, unfolding on click.
-- Keyboard: `Cmd` + `WASD` walks nodes and arrows; `Cmd` + `F` centres the view on the selection.
+- **iPad**: toolbar buttons are their proper size (Obsidian mobile was restyling them); pressure-sensitive ink now uses sub-pixel pen positions, so small handwriting is crisp and no straight segment trails the pen tip; dots are kept.
+- **Palm protection**: while the pen writes, a resting hand can't press toolbars, scroll, zoom or switch tools. Finger scrolling has inertia.
+- **Lasso** tool (`9`): draw a loop around ink and nodes to select them.
+- **Highlighter** next to the pen; pen width from 0.5.
+- **Selection**: Delete and Duplicate buttons; `Option`-drag makes a copy; `Shift` locks a drag to one axis; a selected straight line has draggable ends.
+- **Shapes and lines**: `Shift` while drawing gives a straight line (15° steps); line ends are magnetic to the grid.
+- The right toolbar is collapsed into the top-right corner (`⋯` unfolds it). Sheets can be pulled past their first and last page. Zoom range is 0.1–8.
+- Much faster on pages with a lot of handwriting.

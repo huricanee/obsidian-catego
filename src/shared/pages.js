@@ -9,6 +9,7 @@
  */
 export const PAGE_GAP = 40;
 export const PAGE_MARGIN = 40; // screen px kept around the document when clamping
+export const PAGE_OVERSCROLL = 0.35; // share of the view height the document may be pulled past its ends
 
 // World units are px at zoom 1; sizes are multiples of the 20px grid.
 export const PAPERS = {
@@ -42,7 +43,7 @@ export function normalizeDoc(doc) {
 // A stroke's bounding box never changes while the object is the same (every
 // edit makes a new stroke object), so cache it per object.
 const strokeBox = new WeakMap();
-function boxOfStroke(s) {
+export function boxOfStroke(s) {
   let b = strokeBox.get(s);
   if (b) return b;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -112,7 +113,11 @@ export function clampViewport(vp, layout, viewW, viewH) {
     return [Math.min(a, b), Math.max(a, b)];
   };
   const [loX, hiX] = range(bounds.x0, bounds.x1 - bounds.x0, viewW);
-  const [loY, hiY] = range(bounds.y0, bounds.y1 - bounds.y0, viewH);
+  // Vertically the document may be pulled a third of the screen past either
+  // end, so the top (and the last line) can be brought to a comfortable height.
+  const [loY0, hiY0] = range(bounds.y0, bounds.y1 - bounds.y0, viewH);
+  const slack = viewH * PAGE_OVERSCROLL;
+  const loY = loY0 - slack, hiY = hiY0 + slack;
   const panX = Math.min(hiX, Math.max(loX, vp.panX));
   const panY = Math.min(hiY, Math.max(loY, vp.panY));
   if (panX === vp.panX && panY === vp.panY) return vp;
@@ -122,7 +127,7 @@ export function clampViewport(vp, layout, viewW, viewH) {
 /** Viewport that shows page `index` at full width, top-aligned. */
 export function fitPageViewport(layout, viewW, viewH, index = 0, maxZoom = 1.5) {
   const page = layout.pages[Math.min(index, layout.pages.length - 1)];
-  const zoom = Math.max(0.15, Math.min(maxZoom, (viewW - 2 * PAGE_MARGIN) / page.w));
+  const zoom = Math.max(0.1, Math.min(maxZoom, (viewW - 2 * PAGE_MARGIN) / page.w));
   return {
     zoom,
     panX: (viewW - page.w * zoom) / 2 - page.x * zoom,

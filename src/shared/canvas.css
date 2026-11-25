@@ -1927,7 +1927,7 @@
    Touch screens (iPad): bigger targets, no hotkey badges
    ============================================================ */
 @media (pointer: coarse) {
-  .toolbar-btn { width: 42px; height: 42px; }
+  .toolbar-btn { width: 36px; height: 36px; }
   .hk-pill { display: none; }
   .color-swatch { width: 28px; height: 28px; }
   .seg-btn { padding: 10px 10px; font-size: 13px; }
@@ -1979,3 +1979,35 @@
   .prop-row { padding: 9px 8px; font-size: 14px; }
   .props-panel.compact { width: 240px; }
 }
+
+/* Toolbars a touch smaller (top tools + right functions). */
+.toolbar { gap: 2px; padding: 4px 5px; border-radius: 10px; }
+.toolbar-btn { width: 30px; height: 30px; border-radius: 7px; }
+.toolbar-btn svg { width: 16px; height: 16px; }
+.toolbar.toolbar-functions .toolbar-btn svg { width: 15px; height: 15px; }
+.toolbar.toolbar-functions .toolbar-divider { width: 20px; }
+@media (pointer: coarse) {
+  .toolbar-btn { width: 36px; height: 36px; }
+  .toolbar-btn svg, .toolbar.toolbar-functions .toolbar-btn svg { width: 17px; height: 17px; }
+}
+/* Ends of a selected straight line */
+.sel-resize-handle.line-end { cursor: move; }
+
+/* Lasso tool */
+.select-hit-layer.lasso-top { z-index: 100; cursor: crosshair; }
+.canvas-root.lasso-mode { cursor: crosshair; }
+.lasso-path { fill: rgba(207, 123, 240, 0.06); stroke: #cf7bf0; stroke-linejoin: round; }
+/* Resize handles sized for fingers / stylus (Excalidraw: 8 mouse, 16 pen, 28 touch) */
+@media (pointer: coarse) {
+  .resize-handle { width: 18px; height: 18px; }
+  .resize-handle.nw { top: -9px; left: -9px; }
+  .resize-handle.ne { top: -9px; right: -9px; }
+  .resize-handle.sw { bottom: -9px; left: -9px; }
+  .resize-handle.se { bottom: -9px; right: -9px; }
+}
+
+/* Functions toolbar: top-right corner, collapsed to "more · undo · redo". */
+.toolbar.toolbar-functions { top: 16px; right: 16px; transform: none; }
+.toolbar.toolbar-functions.collapsed { flex-direction: row; }
+.toolbar.toolbar-functions.collapsed > *:not(.fn-keep) { display: none; }
+.pen-toolbar .seg-row { margin-bottom: 2px; }

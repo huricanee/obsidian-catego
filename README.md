@@ -56,6 +56,9 @@ The essentials:
 | `.` + `WASD` | jump to the nearest **arrow** in that direction |
 | `Option` + `WASD` | resize |
 | `Cmd` + `C` / `X` / `V` | copy / cut / paste the selection (with its arrows and ink) |
+| `9` | lasso: draw a loop around ink and nodes to select them |
+| `Option` + drag | drag a copy |
+| `Shift` while dragging / drawing | lock to an axis · straight line in 15° steps |
 | `I` `J` `K` `L` | pull an arrow out of the selected node |
 | `Shift` + letter | set the node / arrow type |
 | `Shift` + `1`…`0` | color |

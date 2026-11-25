@@ -1,15 +1,15 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo, memo } from 'react';
 import { getStroke } from 'perfect-freehand';
 import './canvas.css';
 import 'katex/dist/katex.min.css';
 import { renderRichToHtml } from './richtext.js';
 import { NODE_KINDS, EDGE_KINDS, NODE_STATUSES, FONT_FAMILIES } from './argTypes.js';
-import { clampViewport } from './pages.js';
+import { clampViewport, boxOfStroke } from './pages.js';
 import { recognizeShape } from './shapeSnap.js';
 
 export const GRID_SIZE = 20;
-const MIN_ZOOM = 0.15;
-const MAX_ZOOM = 2.0;
+export const MIN_ZOOM = 0.1;
+export const MAX_ZOOM = 8;
 const ZOOM_IN_FACTOR = 1.08;
 const ZOOM_OUT_FACTOR = 0.92;
 
@@ -272,6 +272,20 @@ function snap(v) {
   return Math.round(v / GRID_SIZE) * GRID_SIZE;
 }
 
+// Soft ("magnetic") grid snap: within MAGNET_ZONE of a grid line the value
+// sticks to it; further out it eases back to free movement, so there is no
+// jump anywhere — at half a cell it meets the neighbouring line's pull.
+const MAGNET_ZONE = GRID_SIZE * 0.2;
+function magnet(v) {
+  const r = snap(v);
+  const d = v - r;
+  const a = Math.abs(d);
+  if (a <= MAGNET_ZONE) return r;
+  const half = GRID_SIZE / 2;
+  const t = Math.min(1, (a - MAGNET_ZONE) / (half - MAGNET_ZONE));
+  return r + Math.sign(d) * half * Math.pow(t, 1.35);
+}
+
 /* ================================================================
    Utility: pill bounds (half-width, half-height) for a typed arrow.
 
@@ -387,7 +401,7 @@ export function resolveEndpoint(arrow, end, nodes, arrows, heights, edgeKinds, r
    ================================================================ */
 function pointsToPath(points) {
   if (!points || points.length === 0) return '';
-  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y} l 0.01 0`; // a dot — still hittable
   let d = `M ${points[0].x} ${points[0].y}`;
   for (let i = 1; i < points.length; i++) {
     const prev = points[i - 1];
@@ -415,44 +429,86 @@ const HOLD_STILL_PX = 5; // screen px the pointer may drift and still count as r
 // Set by the touch adapter around the mouse events it synthesises, so the one
 // drawing pipeline (mouse) records real pen pressure.
 let activePenPressure = null;
+// Sub-pixel client position of the stylus for the mousedown being replayed
+// (touch events report whole CSS pixels; pointer events don't).
+let activePenPos = null;
+// True while a touch-screen contact (finger or stylus) is being replayed as
+// mouse events — such strokes get the light "precise" streamline.
+let activeTouchInput = false;
+const STREAMLINE_PRECISE = 0.2; // pen / touch (Excalidraw's DEFAULT_STROKE_STREAMLINE_PRECISE)
+const STREAMLINE_MOUSE = 0.5;
+const SHIFT_LOCK_ANGLE = Math.PI / 12; // 15° steps while Shift is held
+// Stored ink is rounded to 1/100 px: invisible, and it keeps a page of
+// handwriting from being megabytes of float noise in the file.
+const r2 = (v) => Math.round(v * 100) / 100;
 function penPoint(x, y) {
-  return activePenPressure == null ? { x, y } : { x, y, p: Math.round(activePenPressure * 1000) / 1000 };
+  return activePenPressure == null ? { x: r2(x), y: r2(y) } : { x: r2(x), y: r2(y), p: Math.round(activePenPressure * 1000) / 1000 };
 }
-function appendStrokePoint(cs, x, y) {
+// End point of a straight line from `a`: Shift locks the direction to 15°
+// steps (the pointer is projected onto that ray), Ctrl/Cmd leaves it free,
+// otherwise it is magnetised to the grid.
+function lineEndPoint(a, x, y, mods) {
+  if (mods && mods.lock) {
+    const ang = Math.round(Math.atan2(y - a.y, x - a.x) / SHIFT_LOCK_ANGLE) * SHIFT_LOCK_ANGLE;
+    const len = (x - a.x) * Math.cos(ang) + (y - a.y) * Math.sin(ang);
+    return { x: a.x + Math.cos(ang) * len, y: a.y + Math.sin(ang) * len };
+  }
+  if (mods && mods.free) return { x, y };
+  return { x: magnet(x), y: magnet(y) };
+}
+function appendStrokePoint(cs, x, y, mods) {
   if (!cs) return;
+  // Shift while drawing: the stroke becomes a straight line from its start.
+  if (mods && mods.lock && !cs.shape) { cs.shape = 'line'; cs.points = [cs.points[0]]; }
   if (cs.shape) {
-    // Already snapped: a line's free end keeps following the pointer (so it can
-    // be aimed); a rectangle / ellipse is final.
-    if (cs.shape === 'line') cs.points = [cs.points[0], { x, y }];
+    // Already a shape: a line's free end keeps following the pointer (so it
+    // can be aimed); a rectangle / ellipse is final.
+    if (cs.shape === 'line') cs.points = [cs.points[0], lineEndPoint(cs.points[0], x, y, mods)];
     return;
   }
   cs.points.push(penPoint(x, y));
 }
+const modsOf = (e) => ({ lock: !!e.shiftKey, free: !!(e.metaKey || e.ctrlKey) });
 
-export function gelStrokePath(points, width, shape) {
+// perfect-freehand has distances hard-coded in its own input units: it leaves
+// the last 3 units of a stroke unprocessed ("noise at the end of the line") and
+// bridges them with a straight segment to the tip. At 1 unit = 1 world px that
+// bridge is 3 px — 1/7 of a grid cell, plainly visible trailing the pen once
+// zoomed in. So the outline is computed on coordinates scaled up by INK_SCALE
+// and scaled back: the bridge shrinks to 3 / INK_SCALE px. (Everything else in
+// the library is relative to `size`, which is scaled along.)
+const INK_SCALE = 20;
+export function gelStrokePath(points, width, shape, streamline, flat) {
   if (!points || points.length === 0) return '';
-  if (shape) {
+  const K = INK_SCALE;
+  if (shape || flat) {
     // A snapped shape: constant width, no smoothing lag — corners stay corners.
-    const o = getStroke(points.map((p) => [p.x, p.y]), {
-      size: Math.max(1.5, width || 4), thinning: 0, smoothing: 0.5, streamline: 0, simulatePressure: false, last: true,
+    // A highlighter stroke: constant width too, lightly streamlined.
+    const o = getStroke(points.map((p) => [p.x * K, p.y * K]), {
+      size: Math.max(0.6, width || 4) * K, thinning: 0, smoothing: 0.5, streamline: shape ? 0 : 0.3, simulatePressure: false, last: true,
     });
     if (!o.length) return '';
-    return 'M ' + o.map(([x, y]) => `${x.toFixed(2)} ${y.toFixed(2)}`).join(' L ') + ' Z';
+    return 'M ' + o.map(([x, y]) => `${(x / K).toFixed(2)} ${(y / K).toFixed(2)}`).join(' L ') + ' Z';
   }
   // Points recorded from a stylus carry real pressure (`p`); everything else
   // gets pressure simulated from speed.
   const real = points[0].p != null;
-  const outline = getStroke(real ? points.map((p) => [p.x, p.y, p.p == null ? 0.5 : p.p]) : points.map((p) => [p.x, p.y]), {
+  const scaled = getStroke(real ? points.map((p) => [p.x * K, p.y * K, p.p == null ? 0.5 : p.p]) : points.map((p) => [p.x * K, p.y * K]), {
     // `size` is the brush diameter in px — keep it ~1:1 with the stored
     // width so strokes match the old line weight (no 3× fattening).
-    size: Math.max(1.5, width || 4) * (real ? 1.25 : 1),
+    size: Math.max(0.6, width || 4) * K,
     thinning: real ? 0.6 : 0.55,
     smoothing: 0.5,
-    streamline: real ? 0.35 : 0.5,
+    // Streamline drags every point toward the previous one. Fine for a mouse;
+    // from a pen or a finger it rounds off small handwriting, so those strokes
+    // carry a light value (stored per stroke, as Excalidraw does).
+    streamline: real ? STREAMLINE_PRECISE : (streamline || STREAMLINE_MOUSE),
+    ...(real ? { easing: (t) => Math.sin((t * Math.PI) / 2) } : {}),
     simulatePressure: !real,
     last: true,
   });
-  if (!outline.length) return '';
+  if (!scaled.length) return '';
+  const outline = scaled.map(([x, y]) => [x / K, y / K]);
   // Smooth the outline polygon with quadratic curves through midpoints.
   const d = outline.reduce(
     (acc, [x0, y0], i, arr) => {
@@ -541,7 +597,7 @@ function pixelEraseStrokes(strokes, cx, cy, radius) {
   const result = [];
 
   for (const stroke of strokes) {
-    if (!stroke.points || stroke.points.length === 0) {
+    if (!stroke.points || stroke.points.length === 0 || strokeFarFrom(stroke, cx, cy, radius)) {
       result.push(stroke);
       continue;
     }
@@ -631,6 +687,100 @@ function getSelectionBounds(sel, nodes, strokes, heightMap) {
 }
 
 /* ================================================================
+   Lasso selection (free-form). Even-odd point-in-polygon; a stroke is taken
+   when most of it lies inside the loop, a node when its centre does.
+   ================================================================ */
+function pointInPolygon(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if ((a.y > y) !== (b.y > y) && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+const LASSO_STROKE_SHARE = 0.6; // share of a stroke's points that must be inside
+function lassoSelect(poly, nodes, arrows, strokes, heightMap) {
+  const nodeIds = new Set(), strokeIds = new Set(), arrowIds = new Set();
+  if (poly.length < 3) return { nodeIds, arrowIds, strokeIds };
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of poly) { if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x; if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y; }
+  for (const n of Object.values(nodes)) {
+    const cx = n.x + (n.width || 220) / 2, cy = n.y + (n.height || (heightMap && heightMap[n.id]) || 60) / 2;
+    if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 && pointInPolygon(cx, cy, poly)) nodeIds.add(n.id);
+  }
+  for (const st of strokes || []) {
+    if (!st.points || !st.points.length) continue;
+    const b = boxOfStroke(st);
+    if (b.x1 < x0 || b.x0 > x1 || b.y1 < y0 || b.y0 > y1) continue;
+    const step = Math.max(1, Math.floor(st.points.length / 24)); // sample long strokes
+    let total = 0, inside = 0;
+    for (let i = 0; i < st.points.length; i += step) {
+      total++;
+      if (pointInPolygon(st.points[i].x, st.points[i].y, poly)) inside++;
+    }
+    if (inside / total >= LASSO_STROKE_SHARE) strokeIds.add(st.id);
+  }
+  for (const [aId, a] of Object.entries(arrows)) {
+    if (nodeIds.has(a.fromNodeId) && nodeIds.has(a.toNodeId)) arrowIds.add(aId);
+  }
+  return { nodeIds, arrowIds, strokeIds };
+}
+
+/* ================================================================
+   Ink rendering. A page of handwriting is thousands of strokes, so nothing
+   here may cost "all strokes" per pointer event:
+     · a stroke object is immutable (edits make a new object), so its outline
+       and hit path are computed once and cached per object;
+     · each stroke is a memoised element — it re-renders only when that
+       stroke (or its selection state) changes.
+   ================================================================ */
+const inkPathCache = new WeakMap();
+function inkPaths(stroke) {
+  let c = inkPathCache.get(stroke);
+  if (!c) {
+    c = { outline: gelStrokePath(stroke.points, stroke.width, stroke.shape, stroke.sl, stroke.hl), hit: pointsToPath(stroke.points) };
+    inkPathCache.set(stroke, c);
+  }
+  return c;
+}
+// True when the eraser circle can't possibly touch the stroke (cheap reject
+// before walking its points).
+function strokeFarFrom(stroke, cx, cy, radius) {
+  const b = boxOfStroke(stroke);
+  const pad = radius + (stroke.width || 2);
+  return cx < b.x0 - pad || cx > b.x1 + pad || cy < b.y0 - pad || cy > b.y1 + pad;
+}
+
+const InkStroke = memo(function InkStroke({ stroke, selectable, selected, onDown }) {
+  const { outline, hit } = inkPaths(stroke);
+  return (
+    <g onMouseDown={selectable ? (e) => onDown(e, stroke.id) : undefined}>
+      {/* Wide invisible hit band along the centerline — makes thin strokes
+          easy to click without changing how they look. */}
+      {selectable && (
+        <path
+          d={hit}
+          fill="none"
+          stroke="transparent"
+          strokeWidth={Math.max(16, stroke.width || 2)}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+        />
+      )}
+      <path
+        d={outline}
+        className={`freehand-stroke gel${selected ? ' in-selection' : ''}`}
+        fill={stroke.color || '#cf7bf0'}
+        fillOpacity={(stroke.opacity == null ? 100 : stroke.opacity) / 100}
+        stroke="none"
+        style={{ pointerEvents: 'none' }}
+      />
+    </g>
+  );
+});
+
+/* ================================================================
    CANVAS COMPONENT
    ================================================================ */
 export default function Canvas({
@@ -648,6 +798,7 @@ export default function Canvas({
   drawColor,
   drawWidth,
   drawOpacity,
+  drawFlat,
   onPlaceObject,
   figureShape,
   drawStrokes,
@@ -656,6 +807,7 @@ export default function Canvas({
   eraserRadius,
   onEraseObjects,
   onPixelErase,
+  onEraseEnd,
   selection,
   onSelectionChange,
   onToggleSelect,
@@ -692,6 +844,11 @@ export default function Canvas({
   // Finger gestures (touch screens): two-finger tap, long press on empty space.
   onTwoFingerTap,
   onFingerLongPress,
+  // Alt-drag on a node / stroke: duplicate it (or the selection it belongs
+  // to) in place and select the copies; the drag then moves them.
+  onAltDuplicate,
+  // Lasso tool finished; `found` = something got selected.
+  onLassoEnd,
 }) {
   const rootRef = useRef(null);
   const transformRef = useRef(null);
@@ -773,7 +930,34 @@ export default function Canvas({
 
   /* ---- Freehand drawing state ---- */
   const currentStroke = useRef(null); // { points: [{x,y},...], color, width }
-  const [drawingPreview, setDrawingPreview] = useState(null); // SVG path string while drawing
+  // The stroke being drawn is painted imperatively (one <path>, attributes set
+  // directly): a React render per pointer sample would re-run the whole canvas.
+  const previewPathRef = useRef(null);
+  const setDrawingPreview = useCallback((d) => {
+    const pathEl = previewPathRef.current;
+    if (!pathEl) return;
+    if (!d) { pathEl.style.display = 'none'; pathEl.setAttribute('d', ''); return; }
+    const cs = currentStroke.current;
+    pathEl.setAttribute('d', d);
+    pathEl.setAttribute('fill', (cs && cs.color) || '#cf7bf0');
+    pathEl.setAttribute('fill-opacity', String(((cs && cs.opacity != null) ? cs.opacity : 100) / 100));
+    pathEl.style.display = '';
+  }, []);
+  // Lasso tool: the loop is painted imperatively; the selection it encloses
+  // is recomputed at most once per frame.
+  const lassoPathRef = useRef(null);
+  const lassoRAF = useRef(0);
+  const paintLasso = useCallback((pts) => {
+    const pathEl = lassoPathRef.current;
+    if (!pathEl) return;
+    if (!pts || pts.length < 2) { pathEl.style.display = 'none'; pathEl.setAttribute('d', ''); return; }
+    pathEl.setAttribute('d', 'M ' + pts.map((p) => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' L ') + ' Z');
+    const z = vpRef.current.zoom;
+    pathEl.setAttribute('stroke-width', String(1.5 / z));
+    pathEl.setAttribute('stroke-dasharray', `${7 / z} ${7 / z}`);
+    pathEl.style.display = '';
+  }, []);
+
   // Draw-and-hold: called with the pointer's screen position on every draw
   // event. Once the pointer has rested for HOLD_SNAP_MS the stroke is offered
   // to the shape recogniser.
@@ -793,9 +977,9 @@ export default function Canvas({
       if (!cs || cs.shape) return;
       const found = recognizeShape(cs.points, 24 / vpRef.current.zoom);
       if (!found) return;
-      cs.points = found.points;
+      cs.points = found.kind === 'line' ? found.points.map((pt) => ({ x: magnet(pt.x), y: magnet(pt.y) })) : found.points;
       cs.shape = found.kind;
-      setDrawingPreview(gelStrokePath(cs.points, cs.width, cs.shape));
+      setDrawingPreview(gelStrokePath(cs.points, cs.width, cs.shape, cs.sl, cs.hl));
     }, HOLD_SNAP_MS);
   }, []);
 
@@ -818,6 +1002,42 @@ export default function Canvas({
       y: (sy - vp.panY) / vp.zoom,
     };
   }, []);
+
+  // NOTE: keep hooks up here, not down by the JSX. eslint's rules-of-hooks
+  // walks every code path from the top of the component to each hook; after
+  // the thousands of branches in the render section that never finishes.
+  // Strokes with unique ids (a corrupted board could carry duplicates, which
+  // would collide as React keys).
+  const uniqueStrokes = useMemo(() => {
+    const seen = new Set();
+    return (drawStrokes || []).filter((st) => (seen.has(st.id) ? false : (seen.add(st.id), true)));
+  }, [drawStrokes]);
+  // Click / drag on a stroke in Select mode. Kept in a ref behind a stable
+  // callback so the memoised stroke elements don't re-render with the canvas.
+  const strokeDown = (e, strokeId) => {
+    if (toolMode !== 'select') return;
+    e.stopPropagation();
+    onSelect(null, null);
+    // Alt-drag: drag a copy. Otherwise keep a multi-selection if this stroke is
+    // already part of one, or select just this stroke.
+    if (e.altKey && onAltDuplicate) {
+      onAltDuplicate('stroke', strokeId);
+    } else if (!selection.strokeIds.has(strokeId)) {
+      onSelectionChange({ nodeIds: new Set(), arrowIds: new Set(), strokeIds: new Set([strokeId]) });
+    }
+    // Start a move drag immediately (drag to reposition the stroke).
+    const rect = rootRef.current.getBoundingClientRect();
+    const world = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    dragState.current = {
+      type: 'selectionDrag',
+      startWorldX: world.x, startWorldY: world.y,
+      lastWorldX: world.x, lastWorldY: world.y,
+    };
+  };
+  const strokeDownRef = useRef(strokeDown);
+  useEffect(() => { strokeDownRef.current = strokeDown; });
+  const onStrokeMouseDown = useCallback((e, strokeId) => strokeDownRef.current(e, strokeId), []);
+
 
   /* ================================================================
      Zoom (mouse-centric)
@@ -902,7 +1122,31 @@ export default function Canvas({
     const TAP_MS = 350, TAP_MOVE = 12, LONG_MS = 550;
     const BG_CLASSES = ['canvas-grid', 'canvas-transform', 'drawing-layer', 'eraser-hit-layer', 'select-hit-layer'];
     let penSeen = false;
+    let lastPenT = 0;    // when the stylus last touched / left the board
+    const PALM_GUARD_MS = 1200;
     let g = null;        // the gesture in progress
+    let penIsDown = false;
+    // Momentum after a finger scroll (exponential decay, like a native list).
+    let glide = 0;
+    const stopGlide = () => { if (glide) { cancelAnimationFrame(glide); glide = 0; commitVp(); } };
+    function startGlide(vx, vy) {
+      const TAU = 325; // ms
+      let last = performance.now();
+      const step = (now) => {
+        const dt = Math.min(48, now - last);
+        last = now;
+        const k = Math.exp(-dt / TAU);
+        const before = vpRef.current;
+        const after = writeVp({ ...before, panX: before.panX + vx * dt, panY: before.panY + vy * dt });
+        vx *= k; vy *= k;
+        // Stop when slow, or when the document edge swallowed the move.
+        const stuck = after.panX === before.panX && after.panY === before.panY;
+        if (stuck || Math.hypot(vx, vy) < 0.02) { glide = 0; commitVp(); return; }
+        glide = requestAnimationFrame(step);
+      };
+      glide = requestAnimationFrame(step);
+    }
+    const inPalmWindow = () => penIsDown || (penSeen && Date.now() - lastPenT < PALM_GUARD_MS);
     let lastTap = null;  // { t, x, y } — for double-tap → dblclick
 
     const isStylus = (t) => t.touchType === 'stylus';
@@ -920,18 +1164,58 @@ export default function Canvas({
     const commitVp = () => onUpdateViewport({ ...vpRef.current });
     const clearLong = () => { if (g && g.longTimer) { clearTimeout(g.longTimer); g.longTimer = null; } };
 
+    // Pointer events carry what touch events lack for a stylus: sub-pixel
+    // positions and (where supported) the coalesced samples between frames.
+    // The touch events still drive the gesture; these only refine the ink —
+    // if they never arrive, drawing falls back to the touch coordinates.
+    let penDown = null;
+    function onPenDown(e) {
+      if (e.pointerType === 'pen') penDown = { x: e.clientX, y: e.clientY, t: Date.now() };
+    }
+    function onPenMove(e) {
+      if (e.pointerType !== 'pen' || !g || g.type !== 'mouse' || !g.stylus) return;
+      g.pointerT = Date.now();
+      const coalesced = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : null;
+      const list = coalesced && coalesced.length ? coalesced : [e];
+      const lastS = list[list.length - 1];
+      if (!g.moved && Math.hypot(lastS.clientX - g.startX, lastS.clientY - g.startY) > TAP_MOVE) g.moved = true;
+      g.lastX = lastS.clientX; g.lastY = lastS.clientY;
+      const cs = currentStroke.current;
+      if (dragState.current && dragState.current.type === 'draw' && cs) {
+        const rect = el.getBoundingClientRect();
+        const vp = vpRef.current;
+        for (const sample of list) {
+          if (sample.pressure > 0) activePenPressure = Math.min(1, sample.pressure);
+          appendStrokePoint(cs, (sample.clientX - rect.left - vp.panX) / vp.zoom, (sample.clientY - rect.top - vp.panY) / vp.zoom);
+        }
+        touchHold(lastS.clientX, lastS.clientY);
+        setDrawingPreview(gelStrokePath(cs.points, cs.width, cs.shape, cs.sl, cs.hl));
+      } else {
+        fire('mousemove', lastS);
+      }
+    }
+
     function startMouse(t, stylus) {
-      g = { type: 'mouse', id: t.identifier, stylus, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY, t0: Date.now(), moved: false };
+      g = { type: 'mouse', id: t.identifier, stylus, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY, t0: Date.now(), moved: false, pointerT: 0 };
       activePenPressure = pressureOf(t);
+      const precise = stylus && penDown && Date.now() - penDown.t < 150 && Math.hypot(penDown.x - t.clientX, penDown.y - t.clientY) < 3;
+      activePenPos = precise ? { x: penDown.x, y: penDown.y } : null;
+      activeTouchInput = true;
+      if (stylus) { lastPenT = Date.now(); penIsDown = true; }
       fire('mousedown', t, t.target);
+      activePenPos = null;
     }
     function endMouse(t, cancelled) {
       const point = t || { clientX: g.lastX, clientY: g.lastY, screenX: 0, screenY: 0 };
+      if (g.stylus) { lastPenT = Date.now(); penIsDown = false; }
       fire('mouseup', point);
       activePenPressure = null;
+      activeTouchInput = false;
       const wasTap = !cancelled && !g.moved && Date.now() - g.t0 < TAP_MS * 2;
       g = null;
-      if (!wasTap) return;
+      // A short stroke with a drawing tool is ink (a dot, a comma), never a click.
+      const tool = toolModeRef.current;
+      if (!wasTap || tool === 'draw' || tool === 'eraser') return;
       const target = el.ownerDocument.elementFromPoint(point.clientX, point.clientY) || el;
       fire('click', point, target);
       const now = Date.now();
@@ -943,7 +1227,12 @@ export default function Canvas({
       }
     }
     function startPan(t) {
-      g = { type: 'pan', id: t.identifier, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY, t0: Date.now(), moved: false, maxTouches: 1, longTimer: null };
+      // Right after the pen was writing, a lone contact is most likely the
+      // resting hand: it may still scroll, but only after a decisive move, and
+      // it never counts as a long press.
+      const guard = penSeen && Date.now() - lastPenT < PALM_GUARD_MS;
+      g = { type: 'pan', id: t.identifier, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY, t0: Date.now(), moved: false, maxTouches: 1, longTimer: null, guard, vp0: { ...vpRef.current }, trail: [] };
+      if (guard) return;
       const mine = g;
       g.longTimer = setTimeout(() => {
         if (g !== mine || g.type !== 'pan' || g.moved) return;
@@ -959,10 +1248,13 @@ export default function Canvas({
         t0: from ? from.t0 : Date.now(),
         moved: from ? from.moved : false,
         maxTouches: 2,
+        guard: inPalmWindow(),
+        vp0: from && from.vp0 ? from.vp0 : { ...vpRef.current },
       };
     }
 
     function onTouchStart(e) {
+      stopGlide();
       const target = e.target;
       // Let native handle text being edited and real controls.
       if (target.closest && (target.closest('[contenteditable="true"]') || target.closest('input, textarea, select, button, a'))) return;
@@ -975,7 +1267,13 @@ export default function Canvas({
           penSeen = true;
           if (g) { // fingers were navigating — the pen takes over
             clearLong();
-            if (g.type === 'mouse') endMouse(null, true); else { commitVp(); g = null; }
+            if (g.type === 'mouse') endMouse(null, true);
+            else {
+              // A hand that landed just before the pen was not a gesture: put
+              // the view back where it was.
+              if (g.vp0 && Date.now() - g.t0 < 1500) writeVp(g.vp0);
+              commitVp(); g = null;
+            }
           }
           startMouse(t, true);
           continue;
@@ -983,7 +1281,7 @@ export default function Canvas({
         if (!g) {
           const tool = toolModeRef.current;
           const drawing = tool === 'draw' || tool === 'eraser';
-          const placing = tool === 'node' || tool === 'region' || tool === 'figure' || tool === 'arrow';
+          const placing = tool === 'node' || tool === 'region' || tool === 'figure' || tool === 'arrow' || tool === 'lasso';
           const bg = isBackground(t.target);
           const actAsMouse = penSeen ? (!drawing && !bg) : (drawing || placing || !bg);
           if (actAsMouse) startMouse(t, false); else startPan(t);
@@ -991,11 +1289,13 @@ export default function Canvas({
           clearLong();
           const first = find(e.touches, g.id);
           if (first) startPinch(first, t, g);
+          if (g && g.type === 'pinch' && inPalmWindow()) g.guard = true;
         } else if (g.type === 'mouse') {
           // A second finger turns a finger-drag into a pinch. Drop a stroke
           // that was only just begun rather than leaving a stray dot.
           const first = find(e.touches, g.id);
-          if (dragState.current && dragState.current.type === 'draw') { currentStroke.current = null; setDrawingPreview(null); }
+          // (Excalidraw's rule: under 10 points it was an accident; a longer one is kept.)
+          if (dragState.current && dragState.current.type === 'draw' && currentStroke.current && currentStroke.current.points.length < 10) { currentStroke.current = null; setDrawingPreview(null); }
           const from = { t0: g.t0, moved: g.moved };
           endMouse(first, true);
           if (first) startPinch(first, t, from);
@@ -1014,16 +1314,21 @@ export default function Canvas({
         if (!t) return;
         if (!g.moved && Math.hypot(t.clientX - g.startX, t.clientY - g.startY) > TAP_MOVE) g.moved = true;
         g.lastX = t.clientX; g.lastY = t.clientY;
+        // The pointer-event path already fed this movement (with better data).
+        if (g.stylus && Date.now() - g.pointerT < 120) return;
         if (g.stylus) { const p = pressureOf(t); if (p != null) activePenPressure = p; }
         fire('mousemove', t);
       } else if (g.type === 'pan') {
         const t = find(e.touches, g.id);
         if (!t) return;
-        if (!g.moved && Math.hypot(t.clientX - g.startX, t.clientY - g.startY) < TAP_MOVE / 2) return;
+        if (!g.moved && Math.hypot(t.clientX - g.startX, t.clientY - g.startY) < (g.guard ? TAP_MOVE * 2 : TAP_MOVE / 2)) return;
         if (!g.moved) { g.moved = true; clearLong(); g.lastX = t.clientX; g.lastY = t.clientY; return; }
         const vp = vpRef.current;
         writeVp({ ...vp, panX: vp.panX + (t.clientX - g.lastX), panY: vp.panY + (t.clientY - g.lastY) });
         g.lastX = t.clientX; g.lastY = t.clientY;
+        const nowT = performance.now();
+        g.trail.push({ x: t.clientX, y: t.clientY, t: nowT });
+        while (g.trail.length > 2 && nowT - g.trail[0].t > 90) g.trail.shift();
       } else if (g.type === 'pinch') {
         const a = find(e.touches, g.ids[0]), b = find(e.touches, g.ids[1]);
         if (!a || !b) return;
@@ -1031,7 +1336,8 @@ export default function Canvas({
         if (!g.moved) {
           const d0 = Math.hypot(cur[0].x - g.start[0].x, cur[0].y - g.start[0].y);
           const d1 = Math.hypot(cur[1].x - g.start[1].x, cur[1].y - g.start[1].y);
-          if (d0 < TAP_MOVE && d1 < TAP_MOVE) return;
+          const need = g.guard ? TAP_MOVE * 3 : TAP_MOVE;
+          if (d0 < need && d1 < need) return;
           g.moved = true; g.last = cur; return;
         }
         const rect = el.getBoundingClientRect();
@@ -1059,7 +1365,15 @@ export default function Canvas({
         clearLong();
         const done = g;
         g = null;
+        if (done.moved && !cancelled && done.trail.length >= 2) {
+          const a = done.trail[0], b = done.trail[done.trail.length - 1];
+          const dt = b.t - a.t;
+          const fresh = performance.now() - b.t < 60; // the finger was still moving when it left
+          const vx = dt > 0 ? (b.x - a.x) / dt : 0, vy = dt > 0 ? (b.y - a.y) / dt : 0;
+          if (fresh && Math.hypot(vx, vy) > 0.25) { startGlide(vx, vy); return; }
+        }
         if (done.moved || cancelled) { commitVp(); return; }
+        if (done.guard) return;
         // A finger tap on empty space is a click there (deselects) — except
         // with a drawing tool, where a click would start a stroke.
         const tool = toolModeRef.current;
@@ -1070,7 +1384,7 @@ export default function Canvas({
         if (e.touches.length >= 2 && find(e.touches, g.ids[0]) && find(e.touches, g.ids[1])) return;
         const done = g;
         g = null;
-        if (!done.moved && !cancelled && done.maxTouches === 2 && Date.now() - done.t0 < TAP_MS) {
+        if (!done.moved && !cancelled && !done.guard && done.maxTouches === 2 && Date.now() - done.t0 < TAP_MS) {
           gestureRef.current.onTwoFingerTap?.();
         } else {
           commitVp();
@@ -1087,15 +1401,34 @@ export default function Canvas({
     el.addEventListener('touchmove', onTouchMove, { passive: false });
     el.addEventListener('touchend', onTouchEnd, { passive: false });
     el.addEventListener('touchcancel', onTouchCancel, { passive: false });
+    el.addEventListener('pointerdown', onPenDown);
+    el.addEventListener('pointermove', onPenMove);
+    // While the pen is writing (or has just lifted), a finger / palm landing
+    // on a toolbar or panel is not a press.
+    const host = el.closest('.catego-root') || el.parentElement;
+    function onPanelTouch(e) {
+      if (!inPalmWindow()) return;
+      const t = e.changedTouches && e.changedTouches[0];
+      if (!t || isStylus(t)) return;
+      if (e.target.closest && e.target.closest('.toolbar, .props-panel, .pen-toolbar, .page-menu')) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }
+    if (host) host.addEventListener('touchstart', onPanelTouch, { capture: true, passive: false });
     return () => {
+      if (host) host.removeEventListener('touchstart', onPanelTouch, { capture: true });
+      if (glide) cancelAnimationFrame(glide);
       clearLong();
       activePenPressure = null;
+      el.removeEventListener('pointerdown', onPenDown);
+      el.removeEventListener('pointermove', onPenMove);
       el.removeEventListener('touchstart', onTouchStart);
       el.removeEventListener('touchmove', onTouchMove);
       el.removeEventListener('touchend', onTouchEnd);
       el.removeEventListener('touchcancel', onTouchCancel);
     };
-  }, [isMobile, onUpdateViewport, writeVp]);
+  }, [isMobile, onUpdateViewport, writeVp, touchHold]);
 
   /* ================================================================
      Touch handling — MOBILE
@@ -1294,7 +1627,7 @@ export default function Canvas({
 
         // === DRAW MODE ===
         if (mode === 'draw') {
-          currentStroke.current = { points: [{ x: world.x, y: world.y }], color: drawColorRef.current || '#cf7bf0', width: drawWidthRef.current || 2, opacity: drawOpacityRef.current, t0: Date.now(), straight: false };
+          currentStroke.current = { points: [{ x: world.x, y: world.y }], color: drawColorRef.current || '#cf7bf0', width: drawWidthRef.current || 2, opacity: drawOpacityRef.current, sl: STREAMLINE_PRECISE };
           touchStateRef.current = { type: 'draw' };
           setDrawingPreview(gelStrokePath([{ x: world.x, y: world.y }], (currentStroke.current && currentStroke.current.width) || drawWidthRef.current || 2));
           return;
@@ -1359,7 +1692,7 @@ export default function Canvas({
           if (currentStroke.current) {
             touchHold(t.clientX, t.clientY);
             appendStrokePoint(currentStroke.current, wx, wy);
-            setDrawingPreview(gelStrokePath(currentStroke.current.points, currentStroke.current.width, currentStroke.current.shape));
+            setDrawingPreview(gelStrokePath(currentStroke.current.points, currentStroke.current.width, currentStroke.current.shape, currentStroke.current.sl, currentStroke.current.hl));
           }
         } else if (touchStateRef.current.type === 'erase') {
           setEraserCursor({ x: wx, y: wy });
@@ -1488,6 +1821,7 @@ export default function Canvas({
         }
         if (touchStateRef.current.type === 'erase') {
           setEraserCursor(null);
+          if (onEraseEndRef.current) onEraseEndRef.current();
         }
         if (touchStateRef.current.type === 'node-drag') {
           setDraggingNodeId(null);
@@ -1605,6 +1939,10 @@ export default function Canvas({
   const performEraseRef = useRef(null);
   const onUpdateRegionRef = useRef(onUpdateRegion);
   useEffect(() => { onUpdateRegionRef.current = onUpdateRegion; }, [onUpdateRegion]);
+  const onLassoEndRef = useRef(onLassoEnd);
+  useEffect(() => { onLassoEndRef.current = onLassoEnd; }, [onLassoEnd]);
+  const onEraseEndRef = useRef(onEraseEnd);
+  useEffect(() => { onEraseEndRef.current = onEraseEnd; }, [onEraseEnd]);
   const onUpdateStrokeRef = useRef(onUpdateStroke);
   useEffect(() => { onUpdateStrokeRef.current = onUpdateStroke; }, [onUpdateStroke]);
   const onRegionDragEndRef = useRef(onRegionDragEnd);
@@ -1625,9 +1963,17 @@ export default function Canvas({
     if (ae && ae.isContentEditable && ae.classList.contains('node-text')) ae.blur();
 
     const rect = rootRef.current.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
+    const mx = (activePenPos ? activePenPos.x : e.clientX) - rect.left;
+    const my = (activePenPos ? activePenPos.y : e.clientY) - rect.top;
     const world = screenToWorld(mx, my);
+
+    if (toolMode === 'lasso') {
+      e.preventDefault();
+      onSelect(null, null);
+      onSelectionChange({ nodeIds: new Set(), arrowIds: new Set(), strokeIds: new Set() });
+      dragState.current = { type: 'lasso', points: [world] };
+      return;
+    }
 
     if (toolMode === 'arrow') {
       // Free-floating arrow: drag from this empty point to another.
@@ -1648,10 +1994,10 @@ export default function Canvas({
     if (toolMode === 'draw') {
       // Start freehand drawing
       e.preventDefault();
-      currentStroke.current = { points: [penPoint(world.x, world.y)], color: drawColor || '#cf7bf0', width: drawWidth || 2, opacity: drawOpacity == null ? 100 : drawOpacity, t0: Date.now(), straight: false };
+      currentStroke.current = { points: [penPoint(world.x, world.y)], color: drawColor || '#cf7bf0', width: drawWidth || 2, opacity: drawOpacity == null ? 100 : drawOpacity, ...(activeTouchInput && activePenPressure == null ? { sl: STREAMLINE_PRECISE } : {}), ...(drawFlat ? { hl: true } : {}) };
       dragState.current = { type: 'draw' };
       touchHold(e.clientX, e.clientY);
-      setDrawingPreview(gelStrokePath(currentStroke.current.points, (currentStroke.current && currentStroke.current.width) || drawWidthRef.current || 2));
+      setDrawingPreview(gelStrokePath(currentStroke.current.points, currentStroke.current.width, null, currentStroke.current.sl, currentStroke.current.hl));
       return;
     }
 
@@ -1713,7 +2059,7 @@ export default function Canvas({
       };
       return;
     }
-  }, [onSelect, toolMode, drawColor, drawWidth, drawOpacity, screenToWorld, onSelectionChange, selection]);
+  }, [onSelect, toolMode, drawColor, drawWidth, drawOpacity, drawFlat, screenToWorld, onSelectionChange, selection]);
 
   /* ================================================================
      Eraser perform helper
@@ -1744,7 +2090,7 @@ export default function Canvas({
         }
       }
       for (const stroke of currentStrokes) {
-        if (strokeHitsCircle(stroke, wx, wy, radius)) {
+        if (!strokeFarFrom(stroke, wx, wy, radius) && strokeHitsCircle(stroke, wx, wy, radius)) {
           hitStrokeIds.push(stroke.id);
         }
       }
@@ -1787,6 +2133,15 @@ export default function Canvas({
 
     // Shift-click: toggle this node in/out of the multi-selection (no drag).
     if (e.shiftKey && onToggleSelect) { onToggleSelect(nodeId, 'node'); return; }
+
+    // Alt-drag: leave the original where it is and drag a copy.
+    if (e.altKey && onAltDuplicate && toolMode === 'select') {
+      onAltDuplicate('node', nodeId);
+      const r = rootRef.current.getBoundingClientRect();
+      const w0 = screenToWorld(e.clientX - r.left, e.clientY - r.top);
+      dragState.current = { type: 'selectionDrag', startWorldX: w0.x, startWorldY: w0.y, lastWorldX: w0.x, lastWorldY: w0.y };
+      return;
+    }
 
     // If this node is part of a multi-selection, start group drag
     if (selection.nodeIds.has(nodeId) && selection.nodeIds.size > 0) {
@@ -1848,7 +2203,7 @@ export default function Canvas({
       affectedArrows,
     };
     setDraggingNodeId(nodeId);
-  }, [nodes, arrows, onSelect, screenToWorld, toolMode, selection, onSelectionChange, onToggleSelect]);
+  }, [nodes, arrows, onSelect, screenToWorld, toolMode, selection, onSelectionChange, onToggleSelect, onAltDuplicate]);
 
   /* ================================================================
      Mouse down on an arrow's midpoint pill -> start arrow creation
@@ -2080,8 +2435,8 @@ export default function Canvas({
         const worldY = (my - vp.panY) / vp.zoom;
         if (currentStroke.current) {
           touchHold(e.clientX, e.clientY);
-          appendStrokePoint(currentStroke.current, worldX, worldY);
-          setDrawingPreview(gelStrokePath(currentStroke.current.points, currentStroke.current.width, currentStroke.current.shape));
+          appendStrokePoint(currentStroke.current, worldX, worldY, modsOf(e));
+          setDrawingPreview(gelStrokePath(currentStroke.current.points, currentStroke.current.width, currentStroke.current.shape, currentStroke.current.sl, currentStroke.current.hl));
         }
         return;
       }
@@ -2193,16 +2548,54 @@ export default function Canvas({
       }
 
       if (ds.type === 'selectionDrag') {
+        // The displacement (in cells) is magnetised: whole-cell moves stick,
+        // everything in between is reachable. `applied` is what the board
+        // has been moved by so far.
         const vp = vpRef.current;
-        const worldX = (mx - vp.panX) / vp.zoom;
-        const worldY = (my - vp.panY) / vp.zoom;
-        const dx = snap(worldX - ds.lastWorldX);
-        const dy = snap(worldY - ds.lastWorldY);
+        const rawX = (mx - vp.panX) / vp.zoom - ds.startWorldX;
+        const rawY = (my - vp.panY) / vp.zoom - ds.startWorldY;
+        const free = e.metaKey || e.ctrlKey; // Ctrl/Cmd: no magnet
+        // A group with nodes moves in whole cells; ink alone is magnetic.
+        const hard = selectionRef.current.nodeIds.size > 0 || (selectionRef.current.regionIds && selectionRef.current.regionIds.size > 0);
+        let tx = hard ? snap(rawX) : (free ? rawX : magnet(rawX));
+        let ty = hard ? snap(rawY) : (free ? rawY : magnet(rawY));
+        // Shift: lock to the dominant axis (may flip mid-drag, as in Excalidraw).
+        if (e.shiftKey) { if (Math.abs(rawX) < Math.abs(rawY)) tx = 0; else ty = 0; }
+        const dx = tx - (ds.appliedX || 0);
+        const dy = ty - (ds.appliedY || 0);
         if (dx !== 0 || dy !== 0) {
           onMoveSelection(dx, dy);
-          ds.lastWorldX += dx;
-          ds.lastWorldY += dy;
+          ds.appliedX = tx;
+          ds.appliedY = ty;
         }
+        return;
+      }
+
+      if (ds.type === 'lasso') {
+        const vp = vpRef.current;
+        const wx = (mx - vp.panX) / vp.zoom, wy = (my - vp.panY) / vp.zoom;
+        const lastPt = ds.points[ds.points.length - 1];
+        if (Math.hypot(wx - lastPt.x, wy - lastPt.y) < 3 / vp.zoom) return;
+        ds.points.push({ x: wx, y: wy });
+        paintLasso(ds.points);
+        if (!lassoRAF.current) {
+          lassoRAF.current = requestAnimationFrame(() => {
+            lassoRAF.current = 0;
+            const cur = dragState.current;
+            if (!cur || cur.type !== 'lasso') return;
+            onSelectionChange(lassoSelect(cur.points, nodesRef.current, arrowsRef.current, drawStrokesRef.current, nodeHeightRef.current));
+          });
+        }
+        return;
+      }
+
+      if (ds.type === 'lineEnd') {
+        const vp = vpRef.current;
+        const pts = ds.points.slice();
+        pts[ds.index] = lineEndPoint(pts[1 - ds.index], (mx - vp.panX) / vp.zoom, (my - vp.panY) / vp.zoom, modsOf(e));
+        ds.points = pts;
+        ds.moved = true;
+        if (onUpdateStrokeRef.current) onUpdateStrokeRef.current(ds.strokeId, { points: pts });
         return;
       }
 
@@ -2244,8 +2637,13 @@ export default function Canvas({
         const vp = vpRef.current;
         const worldX = (mx - vp.panX) / vp.zoom;
         const worldY = (my - vp.panY) / vp.zoom;
-        const newX = snap(worldX - ds.offsetX);
-        const newY = snap(worldY - ds.offsetY);
+        let rawNX = worldX - ds.offsetX, rawNY = worldY - ds.offsetY;
+        // Shift: keep the node on the axis it has moved along the most.
+        const n0 = nodesRef.current[ds.nodeId];
+        if (e.shiftKey && n0) { if (Math.abs(rawNX - n0.x) < Math.abs(rawNY - n0.y)) rawNX = n0.x; else rawNY = n0.y; }
+        // Nodes (and the arrows hanging off them) live on the grid — hard snap.
+        const newX = snap(rawNX);
+        const newY = snap(rawNY);
         // DOM-direct positioning (immediate visual update for the dragged node)
         const nodeEl = nodeElsRef.current[ds.nodeId];
         if (nodeEl) {
@@ -2563,7 +2961,8 @@ export default function Canvas({
       }
       if (ds && ds.type === 'draw') {
         cancelHold();
-        if (currentStroke.current && currentStroke.current.points.length > 1 && onAddStroke) {
+        // One point is a dot (the dot of an i, a decimal point) — keep it.
+        if (currentStroke.current && currentStroke.current.points.length >= 1 && onAddStroke) {
           onAddStroke({ ...currentStroke.current });
         }
         currentStroke.current = null;
@@ -2606,13 +3005,25 @@ export default function Canvas({
           ds.commitRAF = null;
         }
         if (ds.lastX !== undefined && (ds.lastX !== ds.committedX || ds.lastY !== ds.committedY)) {
-          onUpdateNode(ds.nodeId, { x: ds.lastX, y: ds.lastY });
+          // The drag is magnetic (free between grid lines); the drop is not.
+          const fx = snap(ds.lastX), fy = snap(ds.lastY);
+          const nodeEl = nodeElsRef.current[ds.nodeId];
+          if (nodeEl) { nodeEl.style.left = fx + 'px'; nodeEl.style.top = fy + 'px'; }
+          onUpdateNode(ds.nodeId, { x: fx, y: fy });
         }
         setDraggingNodeId(null);
         onNodeDragEnd();
       }
+      if (ds && ds.type === 'lasso') {
+        if (lassoRAF.current) { cancelAnimationFrame(lassoRAF.current); lassoRAF.current = 0; }
+        const found = lassoSelect(ds.points, nodesRef.current, arrowsRef.current, drawStrokesRef.current, nodeHeightRef.current);
+        onSelectionChange(found);
+        paintLasso(null);
+        if (onLassoEndRef.current) onLassoEndRef.current(found.nodeIds.size + found.strokeIds.size > 0);
+      }
       if (ds && ds.type === 'erase') {
-        // Erase done
+        // One undo step for the whole erasing gesture.
+        if (onEraseEndRef.current) onEraseEndRef.current();
       }
       if (ds && ds.type === 'rectSelect') {
         setSelectRect(null);
@@ -2621,7 +3032,17 @@ export default function Canvas({
           // Start panning instead
         }
       }
-      if (ds && (ds.type === 'selectionDrag' || ds.type === 'selResize')) {
+      if (ds && ds.type === 'selectionDrag') {
+        // Nodes live on the grid: settle the group onto whole cells. Ink alone
+        // keeps the (magnetised) position it was dropped at.
+        if (selectionRef.current.nodeIds.size > 0 && (ds.appliedX || ds.appliedY)) {
+          const fx = snap(ds.appliedX || 0) - (ds.appliedX || 0);
+          const fy = snap(ds.appliedY || 0) - (ds.appliedY || 0);
+          if (fx !== 0 || fy !== 0) onMoveSelection(fx, fy);
+        }
+        onSelectionDragEnd();
+      }
+      if (ds && (ds.type === 'selResize' || (ds.type === 'lineEnd' && ds.moved))) {
         onSelectionDragEnd();
       }
       if (ds && ds.type === 'resize') {
@@ -2728,7 +3149,7 @@ export default function Canvas({
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };
-  }, [onUpdateViewport, onUpdateNode, onAddArrow, onAddNode, onAddStroke, onMoveSelection, onSelectionDragEnd, onNodeDragEnd, onSelectionChange]);
+  }, [onUpdateViewport, onUpdateNode, onAddArrow, onAddNode, onAddStroke, onMoveSelection, onSelectionDragEnd, onNodeDragEnd, onSelectionChange, paintLasso]);
 
   /* ================================================================
      Handle mouse leaving canvas - hide eraser cursor
@@ -4019,6 +4440,7 @@ export default function Canvas({
     : toolMode === 'eraser' ? ' eraser-mode'
     : toolMode === 'move' ? ' move-mode'
     : toolMode === 'arrow' ? ' arrow-mode'
+    : toolMode === 'lasso' ? ' lasso-mode'
     : (toolMode === 'node' || toolMode === 'region' || toolMode === 'figure') ? ' place-mode'
     : '';
 
@@ -4028,6 +4450,16 @@ export default function Canvas({
   const strokeSelBounds = (selection.strokeIds.size > 0 || selection.nodeIds.size > 1)
     ? getSelectionBounds(selection, nodes, drawStrokes, nodeHeightMap)
     : null;
+  // A single selected straight line: its two ends can be dragged (magnetic).
+  const selLine = (selection.strokeIds.size === 1 && selection.nodeIds.size === 0)
+    ? (drawStrokes || []).find((st) => selection.strokeIds.has(st.id) && st.shape === 'line' && st.points && st.points.length === 2)
+    : null;
+  const onLineEndMouseDown = (e, index) => {
+    if (e.button !== 0 || !selLine) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragState.current = { type: 'lineEnd', strokeId: selLine.id, index, points: selLine.points, moved: false };
+  };
   const onSelResizeMouseDown = (e) => {
     if (e.button !== 0 || !strokeSelBounds) return;
     e.preventDefault();
@@ -4144,71 +4576,32 @@ export default function Canvas({
 
         {/* Freehand drawing layer */}
         <svg className={`drawing-layer${toolMode === 'draw' ? ' active' : ''}`} width="1" height="1">
-          {/* Persisted strokes — gel-pen fill outlines */}
-          {drawStrokes && drawStrokes
-            // Defensive: drop any duplicate-id strokes so React keys stay
-            // unique (a corrupted board could carry dupes from older sessions).
-            .filter((s, i, arr) => arr.findIndex((x) => x.id === s.id) === i)
-            .map((stroke) => (
-            <g
+          {/* Persisted strokes — gel-pen fill outlines (memoised per stroke) */}
+          {uniqueStrokes.map((stroke) => (
+            <InkStroke
               key={stroke.id}
-              onMouseDown={(e) => {
-                if (toolMode !== 'select') return;
-                e.stopPropagation();
-                onSelect(null, null);
-                // Keep a multi-selection if this stroke is already part of one;
-                // otherwise select just this stroke.
-                if (!selection.strokeIds.has(stroke.id)) {
-                  onSelectionChange({ nodeIds: new Set(), arrowIds: new Set(), strokeIds: new Set([stroke.id]) });
-                }
-                // Start a move drag immediately (drag to reposition the stroke).
-                const rect = rootRef.current.getBoundingClientRect();
-                const world = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-                dragState.current = {
-                  type: 'selectionDrag',
-                  startWorldX: world.x, startWorldY: world.y,
-                  lastWorldX: world.x, lastWorldY: world.y,
-                };
-              }}
-            >
-              {/* Wide invisible hit band along the centerline — makes thin
-                  strokes easy to click without changing how they look. */}
-              <path
-                d={pointsToPath(stroke.points)}
-                fill="none"
-                stroke="transparent"
-                strokeWidth={Math.max(16, stroke.width || 2)}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                style={{ pointerEvents: toolMode === 'select' ? 'stroke' : 'none', cursor: 'pointer' }}
-              />
-              <path
-                d={gelStrokePath(stroke.points, stroke.width, stroke.shape)}
-                className={`freehand-stroke gel${selection.strokeIds.has(stroke.id) ? ' in-selection' : ''}`}
-                fill={stroke.color || '#cf7bf0'}
-                fillOpacity={(stroke.opacity == null ? 100 : stroke.opacity) / 100}
-                stroke="none"
-                style={{ pointerEvents: 'none' }}
-              />
-            </g>
-          ))}
-          {/* Live preview while drawing */}
-          {drawingPreview && currentStroke.current && (
-            <path
-              d={drawingPreview}
-              className="freehand-stroke gel"
-              fill={currentStroke.current.color || '#cf7bf0'}
-              fillOpacity={(currentStroke.current.opacity == null ? 100 : currentStroke.current.opacity) / 100}
-              stroke="none"
-              opacity={0.7}
+              stroke={stroke}
+              selectable={toolMode === 'select'}
+              selected={selection.strokeIds.has(stroke.id)}
+              onDown={onStrokeMouseDown}
             />
-          )}
+          ))}
+          {/* Live preview while drawing — painted imperatively (setDrawingPreview) */}
+          <path ref={previewPathRef} className="freehand-stroke gel" stroke="none" style={{ display: 'none', pointerEvents: 'none' }} />
         </svg>
 
         {/* Eraser hit layer - catches mouse events in eraser mode */}
         {toolMode === 'eraser' && (
           <div className="eraser-hit-layer" />
         )}
+
+        {/* Lasso: a hit layer above everything, so the loop can start anywhere */}
+        {toolMode === 'lasso' && (
+          <div className="select-hit-layer lasso-top" />
+        )}
+        <svg className="select-rect-layer" width="1" height="1">
+          <path ref={lassoPathRef} className="lasso-path" style={{ display: 'none' }} />
+        </svg>
 
         {/* Select hit layer - catches mouse events in select mode for rect selection */}
         {toolMode === 'select' && (
@@ -4231,7 +4624,7 @@ export default function Canvas({
         )}
 
         {/* Stroke selection bounding box */}
-        {strokeSelBounds && (
+        {strokeSelBounds && !selLine && (
           <svg className="select-rect-layer" width="1" height="1">
             <rect
               x={strokeSelBounds.x - 4 / zoom}
@@ -4247,7 +4640,21 @@ export default function Canvas({
             />
           </svg>
         )}
-        {strokeSelBounds && toolMode === 'select' && (
+        {selLine && toolMode === 'select' && selLine.points.map((pt, i) => (
+          <div
+            key={i}
+            className="sel-resize-handle line-end"
+            title="Drag to move this end"
+            style={{
+              left: pt.x, top: pt.y,
+              width: 14 / zoom, height: 14 / zoom,
+              marginLeft: -7 / zoom, marginTop: -7 / zoom,
+              borderWidth: 2 / zoom,
+            }}
+            onMouseDown={(e) => onLineEndMouseDown(e, i)}
+          />
+        ))}
+        {strokeSelBounds && !selLine && toolMode === 'select' && (
           <div
             className="sel-resize-handle"
             title="Drag to resize the selection"

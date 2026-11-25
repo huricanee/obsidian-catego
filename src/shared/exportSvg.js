@@ -552,7 +552,7 @@ function flipLightness(hex) {
 
 function renderStrokes(strokes, light) {
   return (strokes || []).map((st) => {
-    const d = gelStrokePath(st.points, st.width, st.shape);
+    const d = gelStrokePath(st.points, st.width, st.shape, st.sl, st.hl);
     if (!d) return '';
     const color = light ? flipLightness(st.color || '#cf7bf0') : (st.color || '#cf7bf0');
     const op = (st.opacity == null ? 100 : st.opacity) / 100;

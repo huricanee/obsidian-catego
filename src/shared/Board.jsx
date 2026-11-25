@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import Canvas, { NEW_NODE_W, NEW_NODE_H } from './Canvas.jsx';
+import Canvas, { NEW_NODE_W, NEW_NODE_H, MIN_ZOOM, MAX_ZOOM } from './Canvas.jsx';
 import { NODE_KINDS, NODE_KIND_ORDER, EDGE_KINDS, EDGE_KIND_ORDER, NODE_STATUSES, NODE_STATUS_ROWS, FONT_FAMILY_ORDER, FONT_FAMILY_LABEL, DEFAULT_FONT_SIZE } from './argTypes.js';
 
 // Arrow kinds that fold n-ary participants instead of nesting another pill.
@@ -147,7 +147,10 @@ function takeSnapshot(state) {
   return {
     nodes: JSON.parse(JSON.stringify(state.nodes)),
     arrows: JSON.parse(JSON.stringify(state.arrows)),
-    strokes: JSON.parse(JSON.stringify(state.strokes || [])),
+    // Ink is shared by reference: stroke objects are never mutated (every edit
+    // makes a new object / array), and deep-cloning a page of handwriting on
+    // each stroke — times 50 undo steps — is what made long pages crawl.
+    strokes: state.strokes || [],
     regions: JSON.parse(JSON.stringify(state.regions || {})),
   };
 }
@@ -264,6 +267,13 @@ export default function Board({
   // Properties panel: every property is one `name: value` line; the one
   // named here is unfolded to show its choices.
   const [openProp, setOpenProp] = useState(null);
+  // Functions toolbar (top-right corner): collapsed to undo / redo / "more" so
+  // a writing hand has nothing to brush against; "more" unfolds the rest.
+  const [fnOpen, setFnOpen] = useState(false);
+  // Pen kind: 'pen' or 'highlighter' (wide, translucent, constant width). Each
+  // keeps its own colour / width / opacity; the other one's are parked here.
+  const [penKind, setPenKind] = useState('pen');
+  const parkedPenRef = useRef({ color: '#ffd43b', width: 14, opacity: 35 });
   // Page-setup popover (infinite board ⇄ sheets).
   const [pageMenuOpen, setPageMenuOpen] = useState(false);
   // Finger gestures (see the touch adapter in Canvas.jsx).
@@ -283,7 +293,7 @@ export default function Board({
     else { setToolMode('draw'); setPenPanelOpen(true); }
   }, []);
   const [drawColor, setDrawColor] = useState('#cf7bf0');
-  const [drawWidth, setDrawWidth] = useState(4);
+  const [drawWidth, setDrawWidth] = useState(TOUCH ? 2 : 4); // handwriting wants a finer line
   const [drawOpacity, setDrawOpacity] = useState(100); // 1–100
 
   // When on, the selected arrow shows Illustrator-style bezier control
@@ -992,7 +1002,7 @@ export default function Board({
       return { ...prev, strokes: [...(prev.strokes || []), strokeWithId] };
     });
     send({ type: 'stroke:add', stroke: strokeWithId });
-    if (TOUCH) setPenPanelOpen(false); // writing: get the options out of the way
+    if (TOUCH) { setPenPanelOpen(false); setFnOpen(false); } // writing: get the panels out of the way
   }, [setStateWithHistory, send]);
 
   // Region callbacks
@@ -1130,10 +1140,14 @@ export default function Board({
   /* ================================================================
      Eraser callbacks
      ================================================================ */
+  // An erasing gesture fires these many times; they change state without an
+  // undo step, and onEraseEnd records one for the whole gesture.
+  const eraseDirtyRef = useRef(false);
   const onEraseObjects = useCallback((objectIds) => {
     if (!objectIds.nodeIds.length && !objectIds.arrowIds.length && !objectIds.strokeIds.length) return;
+    eraseDirtyRef.current = true;
     send({ type: 'erase:objects', nodeIds: objectIds.nodeIds, arrowIds: objectIds.arrowIds, strokeIds: objectIds.strokeIds });
-    setStateWithHistory((prev) => {
+    setState((prev) => {
       const nodeIdSet = new Set(objectIds.nodeIds);
       const arrowIdSet = new Set(objectIds.arrowIds);
       const strokeIdSet = new Set(objectIds.strokeIds);
@@ -1155,15 +1169,19 @@ export default function Board({
 
       return { ...prev, nodes: newNodes, arrows: newArrows, strokes: newStrokes };
     });
-  }, [setStateWithHistory, send]);
+  }, [send]);
 
   const onPixelErase = useCallback((newStrokes) => {
-    setStateWithHistory((prev) => ({
-      ...prev,
-      strokes: newStrokes,
-    }));
+    eraseDirtyRef.current = true;
+    setState((prev) => ({ ...prev, strokes: newStrokes }));
     send({ type: 'stroke:pixel-erase', newStrokes });
-  }, [setStateWithHistory, send]);
+  }, [send]);
+
+  const onEraseEnd = useCallback(() => {
+    if (!eraseDirtyRef.current) return;
+    eraseDirtyRef.current = false;
+    setState((prev) => { pushHistorySnapshot(prev); return prev; });
+  }, [pushHistorySnapshot]);
 
   /* ================================================================
      Rectangle selection callbacks
@@ -1174,7 +1192,8 @@ export default function Board({
 
   const onDeleteSelection = useCallback(() => {
     const { nodeIds, arrowIds, strokeIds } = selection;
-    if (nodeIds.size === 0 && arrowIds.size === 0 && strokeIds.size === 0) return;
+    const regionIds = selection.regionIds || new Set();
+    if (nodeIds.size === 0 && arrowIds.size === 0 && strokeIds.size === 0 && regionIds.size === 0) return;
 
     // Compute the full cascade up front so the server gets the same set of
     // deletes as the local state. Without this group-delete updated only
@@ -1183,7 +1202,8 @@ export default function Board({
     const removedArrows = new Set(arrowIds);
     for (const [aId, arrow] of Object.entries(arrows)) {
       if (removedArrows.has(aId)) continue;
-      if (nodeIds.has(arrow.fromNodeId) || nodeIds.has(arrow.toNodeId)) {
+      if (nodeIds.has(arrow.fromNodeId) || nodeIds.has(arrow.toNodeId)
+          || regionIds.has(arrow.fromRegionId) || regionIds.has(arrow.toRegionId)) {
         removedArrows.add(aId);
       }
     }
@@ -1211,7 +1231,9 @@ export default function Board({
         if (!removedArrows.has(aId)) newArrows[aId] = arrow;
       }
       const newStrokes = (prev.strokes || []).filter(s => !strokeIds.has(s.id));
-      return { ...prev, nodes: newNodes, arrows: newArrows, strokes: newStrokes };
+      const newRegions = { ...(prev.regions || {}) };
+      for (const id of regionIds) delete newRegions[id];
+      return { ...prev, nodes: newNodes, arrows: newArrows, strokes: newStrokes, regions: newRegions };
     });
 
     // Broadcast individual deletes so the server (and other clients) end
@@ -1222,48 +1244,59 @@ export default function Board({
     for (const id of removedArrows) send({ type: 'arrow:delete', id });
     for (const id of nodeIds)        send({ type: 'node:delete', id });
     for (const id of strokeIds)      send({ type: 'stroke:delete', id });
+    for (const id of regionIds)      send({ type: 'region:delete', id });
 
     setSelection({ nodeIds: new Set(), arrowIds: new Set(), strokeIds: new Set() });
     setSelectedId(null);
     setSelectedType(null);
   }, [selection, arrows, setStateWithHistory, send]);
 
-  // Move selected nodes (group drag).
-  // CRITICAL: must broadcast every moved node so the server (and other
-  // clients) see the new positions. Previously this updated React state
-  // only — the move "stuck" locally but the server kept the old position,
-  // so on refresh the init message wiped the local move and the node
-  // appeared to revert.
+  // Move the selection (group drag). Called on every pointer move, so it only
+  // touches local state; onSelectionDragEnd broadcasts the final positions —
+  // without that the server keeps the old ones and a refresh reverts the move.
   const onMoveSelection = useCallback((dx, dy) => {
     setState(prev => {
       const newNodes = { ...prev.nodes };
       for (const id of selection.nodeIds) {
-        if (newNodes[id]) {
-          const nx = newNodes[id].x + dx;
-          const ny = newNodes[id].y + dy;
-          newNodes[id] = { ...newNodes[id], x: nx, y: ny };
-          send({ type: 'node:update', id, updates: { x: nx, y: ny } });
-        }
+        if (newNodes[id]) newNodes[id] = { ...newNodes[id], x: newNodes[id].x + dx, y: newNodes[id].y + dy };
       }
-      // Move selected strokes
-      const newStrokes = (prev.strokes || []).map(s => {
-        if (selection.strokeIds.has(s.id)) {
-          const points = s.points.map(p => ({ ...p, x: p.x + dx, y: p.y + dy }));
-          send({ type: 'stroke:update', id: s.id, updates: { points } });
-          return { ...s, points };
-        }
-        return s;
-      });
-      return { ...prev, nodes: newNodes, strokes: newStrokes };
+      const newRegions = { ...(prev.regions || {}) };
+      for (const id of (selection.regionIds || [])) {
+        if (newRegions[id]) newRegions[id] = { ...newRegions[id], x: newRegions[id].x + dx, y: newRegions[id].y + dy };
+      }
+      const newStrokes = (prev.strokes || []).map(s => (
+        selection.strokeIds.has(s.id) ? { ...s, points: s.points.map(p => ({ ...p, x: p.x + dx, y: p.y + dy })) } : s
+      ));
+      return { ...prev, nodes: newNodes, regions: newRegions, strokes: newStrokes };
     });
-  }, [selection, send]);
+  }, [selection]);
 
+  // Group drag / resize finished: one undo step, and one broadcast of where
+  // everything ended up. The broadcast runs in an effect so it reads the state
+  // committed together with the last move.
+  const [selDragEnd, setSelDragEnd] = useState(0);
   const onSelectionDragEnd = useCallback(() => {
+    setSelDragEnd((t) => t + 1);
     setState(prev => {
       pushHistorySnapshot(prev);
       return prev;
     });
   }, [pushHistorySnapshot]);
+  useEffect(() => {
+    if (!selDragEnd) return;
+    for (const id of selection.nodeIds) {
+      const n = state.nodes[id];
+      if (n) send({ type: 'node:update', id, updates: { x: n.x, y: n.y, width: n.width, height: n.height } });
+    }
+    for (const id of (selection.regionIds || [])) {
+      const r = (state.regions || {})[id];
+      if (r) send({ type: 'region:update', id, updates: { x: r.x, y: r.y } });
+    }
+    for (const st of (state.strokes || [])) {
+      if (selection.strokeIds.has(st.id)) send({ type: 'stroke:update', id: st.id, updates: { points: st.points, width: st.width } });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selDragEnd]);
 
   /* ================================================================
      Copy / cut / paste / duplicate — nodes, regions, ink, and every arrow
@@ -1279,9 +1312,9 @@ export default function Board({
     return sel;
   }, [selection, selectedId, selectedType]);
 
-  const collectClip = useCallback(() => {
+  const collectClip = useCallback((only = null) => {
     const st = stateRef.current;
-    const sel = effectiveSelection();
+    const sel = only || effectiveSelection();
     const cNodes = [...sel.nodeIds].map((id) => st.nodes[id]).filter(Boolean);
     const cRegions = [...sel.regionIds].map((id) => (st.regions || {})[id]).filter(Boolean);
     const cStrokes = (st.strokes || []).filter((x) => sel.strokeIds.has(x.id));
@@ -1318,16 +1351,16 @@ export default function Board({
     return true;
   }, [collectClip]);
 
-  const pasteClip = useCallback((clip) => {
+  const pasteClip = useCallback((clip, { inPlace = false } = {}) => {
     if (!clip || clip.catego !== 1) return false;
     const cNodes = clip.nodes || [], cRegions = clip.regions || [], cStrokes = clip.strokes || [], cArrows = clip.arrows || [];
     const cb = contentBounds({ nodes: cNodes, regions: cRegions, strokes: cStrokes, arrows: cArrows });
-    pasteCountRef.current += 1;
-    let dx = 40 * pasteCountRef.current, dy = dx;
+    if (!inPlace) pasteCountRef.current += 1;
+    let dx = inPlace ? 0 : 40 * pasteCountRef.current, dy = dx;
     // The original isn't on screen (other board, scrolled away) → drop the
     // copy in the middle of the view instead of next to it.
     const el = rootRef.current;
-    if (cb && el) {
+    if (cb && el && !inPlace) {
       const m = (document.querySelector('.canvas-transform')?.style.transform || '').match(/translate\(([^,]+)px,\s*([^)]+)px\)\s*scale\(([^)]+)\)/);
       const vp = m ? { panX: parseFloat(m[1]), panY: parseFloat(m[2]), zoom: parseFloat(m[3]) } : stateRef.current.viewport;
       const vx0 = -vp.panX / vp.zoom, vy0 = -vp.panY / vp.zoom;
@@ -1385,6 +1418,33 @@ export default function Board({
       }).catch(() => {});
     } catch { /* clipboard unavailable */ }
   }, [pasteClip]);
+
+  // Delete whatever is selected — a group, or the single selected object.
+  // (Touch screens have no Delete key; this is what the trash buttons call.)
+  const deleteAnySelection = useCallback(() => {
+    const groupSize = selection.nodeIds.size + selection.arrowIds.size + selection.strokeIds.size + (selection.regionIds ? selection.regionIds.size : 0);
+    if (groupSize > 0) { onDeleteSelection(); return; }
+    if (!selectedId) return;
+    if (selectedType === 'node') onDeleteNode(selectedId);
+    else if (selectedType === 'arrow') onDeleteArrow(selectedId);
+    else if (selectedType === 'region') { onDeleteRegion(selectedId); setSelectedId(null); setSelectedType(null); }
+  }, [selection, selectedId, selectedType, onDeleteSelection, onDeleteNode, onDeleteArrow, onDeleteRegion]);
+
+  // Alt-drag (Canvas): copy the object — or the whole selection it is part
+  // of — exactly where it is, and select the copies; the drag moves them.
+  const onAltDuplicate = useCallback((type, id) => {
+    const key = SEL_KEY[type];
+    const inGroup = key && selection[key] && selection[key].has(id);
+    const only = inGroup ? null : {
+      nodeIds: new Set(), arrowIds: new Set(), strokeIds: new Set(), regionIds: new Set(), [key]: new Set([id]),
+    };
+    const clip = collectClip(only);
+    if (clip) pasteClip(clip, { inPlace: true });
+  }, [selection, collectClip, pasteClip]);
+
+  // Lasso finished: with something caught, hand over to the Select tool so
+  // the catch can be moved, resized, recoloured or deleted.
+  const onLassoEnd = useCallback((found) => { if (found) setToolMode('select'); }, []);
 
   const duplicateSelection = useCallback(() => {
     const clip = collectClip();
@@ -2198,7 +2258,7 @@ export default function Board({
           const update = onUpdateViewportRef.current;
           if (update) {
             let newZoom = vp.zoom * factor;
-            newZoom = Math.min(2.0, Math.max(0.15, newZoom));
+            newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
             const scale = newZoom / vp.zoom;
             const cx = window.innerWidth / 2;
             const cy = window.innerHeight / 2;
@@ -2577,6 +2637,14 @@ export default function Board({
   /* ================================================================
      Draw button double-tap handler
      ================================================================ */
+  const switchPenKind = useCallback((kind) => {
+    if (kind === penKind) return;
+    const parked = parkedPenRef.current;
+    parkedPenRef.current = { color: drawColor, width: drawWidth, opacity: drawOpacity };
+    setDrawColor(parked.color); setDrawWidth(parked.width); setDrawOpacity(parked.opacity);
+    setPenKind(kind);
+  }, [penKind, drawColor, drawWidth, drawOpacity]);
+
   const handleDrawTap = useCallback(() => {
     if (toolMode === 'draw') setPenPanelOpen((v) => !v);
     else setToolMode('draw');
@@ -2748,7 +2816,7 @@ export default function Board({
     const cx = window.innerWidth / 2;
     const cy = window.innerHeight / 2;
     let newZoom = viewport.zoom * 1.2;
-    newZoom = Math.min(2.0, Math.max(0.15, newZoom));
+    newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
     const scale = newZoom / viewport.zoom;
     onUpdateViewport({
       zoom: newZoom,
@@ -2761,7 +2829,7 @@ export default function Board({
     const cx = window.innerWidth / 2;
     const cy = window.innerHeight / 2;
     let newZoom = viewport.zoom / 1.2;
-    newZoom = Math.min(2.0, Math.max(0.15, newZoom));
+    newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
     const scale = newZoom / viewport.zoom;
     onUpdateViewport({
       zoom: newZoom,
@@ -2772,25 +2840,20 @@ export default function Board({
 
   const handleFitView = useCallback(() => {
     if (layoutRef.current) { fitPage(); return; } // document: current page, full width
-    const nodeArr = Object.values(nodes);
-    if (nodeArr.length === 0) {
+    // Everything counts: nodes, regions and ink.
+    const cb = contentBounds(stateRef.current);
+    if (!cb) {
       onUpdateViewport({ panX: 0, panY: 0, zoom: defaultZoom });
       return;
     }
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const n of nodeArr) {
-      minX = Math.min(minX, n.x);
-      minY = Math.min(minY, n.y);
-      maxX = Math.max(maxX, n.x + (n.width || 220));
-      maxY = Math.max(maxY, n.y + 80);
-    }
+    const minX = cb.x0, minY = cb.y0, maxX = cb.x1, maxY = cb.y1 + 20;
     const padding = 80;
     const contentW = maxX - minX + padding * 2;
     const contentH = maxY - minY + padding * 2;
     const scaleX = window.innerWidth / contentW;
     const scaleY = window.innerHeight / contentH;
     let zoom = Math.min(scaleX, scaleY, 1.5);
-    zoom = Math.min(2.0, Math.max(0.15, zoom));
+    zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
     const panX = (window.innerWidth - contentW * zoom) / 2 - (minX - padding) * zoom;
     const panY = (window.innerHeight - contentH * zoom) / 2 - (minY - padding) * zoom;
     onUpdateViewport({ panX, panY, zoom });
@@ -2905,6 +2968,7 @@ export default function Board({
         case 'Digit5': setToolMode('region'); break;
         case 'Digit7': setToolMode('draw'); break;
         case 'Digit8': setToolMode('eraser'); setShowDrawOptions(false); break;
+        case 'Digit9': setToolMode('lasso'); setShowDrawOptions(false); break;
         default: return;
       }
       e.preventDefault();
@@ -2963,6 +3027,17 @@ export default function Board({
             <path d="M3 2l2 12 3-4 5-1L3 2z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" fill="none" />
           </svg>
                   <span className="hk-pill">1</span>
+        </button>
+        <button
+          className={`toolbar-btn${toolMode === 'lasso' ? ' tool-active' : ''}`}
+          onClick={() => { setToolMode(toolMode === 'lasso' ? 'select' : 'lasso'); setShowDrawOptions(false); }}
+          title="Lasso (draw a loop around ink and nodes to select them)"
+        >
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
+            <path d="M8 2.2c3.3 0 5.8 1.6 5.8 3.9S11.3 10 8 10 2.2 8.4 2.2 6.1 4.7 2.2 8 2.2z" stroke="currentColor" strokeWidth="1.4" strokeDasharray="2.6 1.8" />
+            <path d="M5.2 9.6c-.9.6-1.2 1.6-.6 2.3.6.7 1.7.5 2-.3.3-.9-.6-1.3-1.5-.9-1 .5-1.6 1.6-1.4 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+                  <span className="hk-pill">9</span>
         </button>
         <button
           className={`toolbar-btn${toolMode === 'move' ? ' tool-active' : ''}`}
@@ -3100,6 +3175,10 @@ export default function Board({
       {/* Pen toolbar — shown while drawing: color, width (1–10), opacity (1–100) */}
       {toolMode === 'draw' && penPanelOpen && (
         <div className="pen-toolbar">
+          <div className="seg-row">
+            <button className={`seg-btn${penKind === 'pen' ? ' active' : ''}`} onClick={() => switchPenKind('pen')}>Pen</button>
+            <button className={`seg-btn${penKind === 'highlighter' ? ' active' : ''}`} onClick={() => switchPenKind('highlighter')}>Highlighter</button>
+          </div>
           <div className="pen-group">
             <span className="props-label">Color</span>
             <div className="color-palette">
@@ -3117,7 +3196,7 @@ export default function Board({
           <div className="pen-group">
             <span className="props-label">Width · {drawWidth}</span>
             <input
-              type="range" min="1" max="10" step="1" value={drawWidth}
+              type="range" min={penKind === 'highlighter' ? 4 : 0.5} max={penKind === 'highlighter' ? 30 : 10} step={penKind === 'highlighter' ? 1 : 0.5} value={drawWidth}
               onChange={(e) => setDrawWidth(Number(e.target.value))}
             />
           </div>
@@ -3132,10 +3211,19 @@ export default function Board({
       )}
 
       {/* Functions toolbar (top-right) — icons only */}
-      <div className="toolbar toolbar-functions">
+      <div className={`toolbar toolbar-functions${fnOpen ? ' open' : ' collapsed'}`}>
+        <button
+          className={`toolbar-btn fn-keep${fnOpen ? ' tool-active' : ''}`}
+          onClick={() => setFnOpen((v) => !v)}
+          title={fnOpen ? 'Hide tools' : 'More: zoom, export, page setup, duplicate, delete…'}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <circle cx="3.5" cy="8" r="1.4" /><circle cx="8" cy="8" r="1.4" /><circle cx="12.5" cy="8" r="1.4" />
+          </svg>
+        </button>
         {/* Undo / Redo */}
         <button
-          className="toolbar-btn"
+          className="toolbar-btn fn-keep"
           onClick={undo}
           disabled={!canUndo}
           title="Undo (Ctrl+Z)"
@@ -3147,7 +3235,7 @@ export default function Board({
                   <span className="hk-pill">⌘Z</span>
         </button>
         <button
-          className="toolbar-btn"
+          className="toolbar-btn fn-keep"
           onClick={redo}
           disabled={!canRedo}
           title="Redo (Ctrl+Shift+Z)"
@@ -3312,6 +3400,18 @@ export default function Board({
           </svg>
         </button>
 
+        {/* Delete the selection (the Delete key does the same) */}
+        <button
+          className="toolbar-btn"
+          onClick={deleteAnySelection}
+          disabled={!selectedId && selection.nodeIds.size + selection.strokeIds.size + selection.arrowIds.size + (selection.regionIds ? selection.regionIds.size : 0) === 0}
+          title="Delete selection (Delete)"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.3a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8.3M6.8 7v4M9.2 7v4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+
         <div className="toolbar-divider" />
         {/* Text ⇄ board: the DSL is the board as text (and what an AI reads/writes). */}
         <button className="toolbar-btn" onClick={() => setDslOpen(true)} title="Import from text (DSL) — ⌘⇧U">
@@ -3353,7 +3453,8 @@ export default function Board({
       {(() => {
         const items = bulkSelected();
         const inkIds = selection.strokeIds;
-        if ((items.length < 2 && inkIds.size === 0) || !propsOpen) return null;
+        // The pen options own the left edge while drawing.
+        if ((items.length < 2 && inkIds.size === 0) || !propsOpen || toolMode === 'draw') return null;
         const nodeCount = items.filter((i) => i.type === 'node').length;
         const firstInk = inkIds.size ? strokes.find((st) => inkIds.has(st.id)) : null;
         return (
@@ -3363,7 +3464,7 @@ export default function Board({
               <div className="seg-row">
                 <button className="seg-btn" onClick={duplicateSelection} title="Duplicate">Duplicate</button>
                 <button className="seg-btn" onClick={copySelection} title="Copy (⌘C)">Copy</button>
-                <button className="seg-btn" onClick={onDeleteSelection} title="Delete">Delete</button>
+                <button className="seg-btn" onClick={deleteAnySelection} title="Delete">Delete</button>
               </div>
               <span className="props-label" style={{ opacity: 0.7, textTransform: 'none', letterSpacing: 0, marginTop: 6 }}>
                 Drag the round handle at the corner of the selection to resize it.
@@ -3372,7 +3473,7 @@ export default function Board({
             {firstInk && (
               <><PropRow id="inkw" label="ink width" value={Math.round((firstInk.width || 2) * 10) / 10} open={openProp} setOpen={setOpenProp}>
                 <input
-                  type="range" min="1" max="10" step="1" value={Math.min(10, Math.max(1, Math.round(firstInk.width || 2)))}
+                  type="range" min="0.5" max="10" step="0.5" value={Math.min(10, Math.max(0.5, Math.round((firstInk.width || 2) * 2) / 2))}
                   onChange={(e) => bulkSetStroke({ width: Number(e.target.value) }, false)}
                   onMouseUp={() => bulkSetStroke({}, true)} onTouchEnd={() => bulkSetStroke({}, true)}
                 />
@@ -3427,7 +3528,7 @@ export default function Board({
                   : selectedId && selectedType === 'arrow' ? arrows[selectedId]
                   : selectedId && selectedType === 'region' ? regions[selectedId]
                   : null;
-        if (!sel || !propsOpen) return null;
+        if (!sel || !propsOpen || toolMode === 'draw') return null;
         const isNode = selectedType === 'node';
         const isArrow = selectedType === 'arrow';
         const isRegion = selectedType === 'region';
@@ -3476,6 +3577,10 @@ export default function Board({
         return (
           <div className={`props-panel compact${openProp ? ' has-open' : ''}`}>
             <div className="props-title">{selectedType}</div>
+            <div className="seg-row" style={{ padding: '0 2px 4px' }}>
+              <button className="seg-btn" onMouseDown={(e) => e.preventDefault()} onClick={duplicateSelection} title="Duplicate">Duplicate</button>
+              <button className="seg-btn" onMouseDown={(e) => e.preventDefault()} onClick={deleteAnySelection} title="Delete (Delete key)">Delete</button>
+            </div>
 
             {/* Color (text color for text nodes) */}
             <PropRow id="color" label="color" value={<ColorVal c={curColor} locked={colorLocked} />} open={openProp} setOpen={setOpenProp}>
@@ -3851,6 +3956,7 @@ export default function Board({
         drawColor={drawColor}
         drawWidth={drawWidth}
         drawOpacity={drawOpacity}
+        drawFlat={penKind === 'highlighter'}
         onPlaceObject={onPlaceObject}
         figureShape={figureShape}
         drawStrokes={strokes}
@@ -3859,6 +3965,7 @@ export default function Board({
         eraserRadius={eraserRadius}
         onEraseObjects={onEraseObjects}
         onPixelErase={onPixelErase}
+        onEraseEnd={onEraseEnd}
         selection={selection}
         onSelectionChange={onSelectionChange}
         onToggleSelect={onToggleSelect}
@@ -3880,6 +3987,8 @@ export default function Board({
         kbArrowDrag={kbArrowDrag}
         kbNudgeApiRef={kbNudgeApiRef}
         docLayout={layout}
+        onAltDuplicate={onAltDuplicate}
+        onLassoEnd={onLassoEnd}
         onTwoFingerTap={onTwoFingerTap}
         onFingerLongPress={onFingerLongPress}
         noteFor={(id) => notes[id] || null}
@@ -3945,7 +4054,7 @@ function ModeBadge({ mode }) {
 const SHORTCUT_SECTIONS = [
   { title: 'Tools (digits)', rows: [
     ['1', 'Select'], ['2', 'Move / pan'], ['4', 'Arrow tool'],
-    ['7', 'Draw'], ['8', 'Eraser'],
+    ['7', 'Draw'], ['8', 'Eraser'], ['9', 'Lasso (loop-select ink and nodes)'],
     ['3 → Space', 'arm Node, then Space to drop one'],
     ['5 → Space', 'arm Region'],
     ['6 then 1–5', 'arm Figure: 1 rect · 2 square · 3 circle · 4 ellipse · 5 triangle → Space'],
@@ -4000,6 +4109,11 @@ const SHORTCUT_SECTIONS = [
     ['⌘/Ctrl + Shift + Z', 'redo'],
     ['Delete / Backspace', 'delete selection'],
     ['⌘C / ⌘X / ⌘V', 'copy / cut / paste objects (with their arrows and ink)'],
+    ['⌥ drag', 'drag a copy of the object / selection'],
+    ['⇧ while dragging', 'lock to one axis · line ends turn in 15° steps'],
+    ['⇧ while drawing', 'straight line from where the stroke began'],
+    ['⌘ while dragging', 'ignore the grid magnet (ink and line ends)'],
+    ['Draw, then hold still', 'snap a rough line / rectangle / ellipse to the clean shape'],
     ['T / V', 'text align centre ⇄ left / vertical align centre ⇄ top'],
     ['⌃7 ⌃8 ⌃9 ⌃0', 'in edit: insert $\\wedge$ $\\vee$ $\\subset$ $\\supset$'],
     ['⌃. ⌃, ⌃= ⌃`', 'in edit: insert $\\Rightarrow$ $\\Leftarrow$ $\\equiv$ $\\sim$'],

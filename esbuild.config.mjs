@@ -46,6 +46,64 @@ const stripRemoteScripts = {
   },
 };
 
+// Obsidian styles bare elements itself — on mobile `button` gets padding, a
+// height and a background through selectors more specific than a class — and
+// that turned the board's toolbars into big grey squares with squashed icons.
+// So every rule of the board's stylesheet is prefixed (same boost for all, so
+// their order among themselves is untouched), and one reset sits just below
+// them: it beats Obsidian's element styles and loses to any board class.
+const BOOST = ':root:root:root:root';
+function boostSpecificity(css) {
+  const src = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  let i = 0;
+  const parse = (untilBrace) => {
+    let out = '';
+    while (i < src.length) {
+      // prelude: up to '{', ';' or the closing '}' of the enclosing block
+      let j = i;
+      while (j < src.length && src[j] !== '{' && src[j] !== ';' && src[j] !== '}') j++;
+      const prelude = src.slice(i, j).trim();
+      if (j >= src.length) { out += prelude; i = j; break; }
+      if (src[j] === '}') { i = j + 1; if (untilBrace) return out; continue; }
+      if (src[j] === ';') { out += prelude + ';\n'; i = j + 1; continue; }
+      i = j + 1; // past '{'
+      if (prelude.startsWith('@')) {
+        if (/^@(media|supports|container|layer)\b/.test(prelude)) {
+          out += prelude + ' {\n' + parse(true) + '}\n';
+        } else { // @keyframes, @font-face, … — copied verbatim
+          let depth = 1, k = i;
+          while (k < src.length && depth > 0) { if (src[k] === '{') depth++; else if (src[k] === '}') depth--; k++; }
+          out += prelude + ' {' + src.slice(i, k) + '\n';
+          i = k;
+        }
+        continue;
+      }
+      const end = src.indexOf('}', i);
+      const body = src.slice(i, end);
+      i = end + 1;
+      const sels = [];
+      let depth = 0, cur = '';
+      for (const ch of prelude) {
+        if (ch === '(') depth++; else if (ch === ')') depth--;
+        if (ch === ',' && depth === 0) { sels.push(cur); cur = ''; } else cur += ch;
+      }
+      sels.push(cur);
+      const boosted = sels.map((x) => x.trim()).filter(Boolean)
+        .map((x) => (/^(html|body|:root)\b/.test(x) ? x : `${BOOST} ${x}`));
+      out += boosted.join(',\n') + ' {' + body + '}\n';
+    }
+    return out;
+  };
+  return parse(false);
+}
+const BUTTON_RESET = `
+:root:root:root .catego-root button {
+  cursor: pointer; border: none; background: none; box-shadow: none; color: inherit;
+  font-family: inherit; font-size: inherit; font-weight: normal; line-height: normal;
+  width: auto; min-width: 0; height: auto; min-height: 0; padding: 1px 6px; border-radius: 0;
+}
+`;
+
 // canvas.css ships as the plugin's styles.css.
 function generateStyles() {
   const canvasCss = fs.readFileSync('src/shared/canvas.css', 'utf8');
@@ -76,7 +134,8 @@ function generateStyles() {
 }
 .catego-root .color-swatch { width: 18px; height: 18px; min-width: 0; padding: 0; flex: 0 0 auto; box-shadow: none; }
 .catego-root .toolbar-btn.props-toggle { position: absolute; top: 44px; left: 12px; }
-.catego-root .mode-badge { position: absolute; top: 44px; right: 14px; bottom: auto; }
+.catego-root .mode-badge { position: absolute; top: auto; bottom: 12px; right: 14px; }
+.catego-root .toolbar.toolbar-functions.toolbar-functions { top: 44px; right: 12px; }
 `;
   // KaTeX stylesheet with its woff2 fonts inlined as data URIs, so LaTeX renders
   // self-contained inside the pane (relative font url()s can't resolve there).
@@ -95,7 +154,7 @@ function generateStyles() {
       .replace(/,\s*url\(fonts\/KaTeX_[A-Za-z0-9_-]+\.ttf\)\s*format\("truetype"\)/g, '');
   } catch { /* katex not installed — skip */ }
 
-  fs.writeFileSync('styles.css', `${wrapper}\n${canvasCss}\n${katexCss}`);
+  fs.writeFileSync('styles.css', `${boostSpecificity(`${wrapper}\n${canvasCss}`)}\n${BUTTON_RESET}\n${katexCss}`);
 }
 
 const ctx = await esbuild.context({
