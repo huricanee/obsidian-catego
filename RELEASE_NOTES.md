@@ -1,9 +1,1 @@
-- **PDF**: import a PDF and write on it — each PDF page becomes a sheet (file menu of a PDF: "Annotate in Catego"; or "Import PDF…" in the page strip). Pages are inverted in the dark theme.
-- **Pictures**: add from a file, paste or drop; stored as normal vault attachments.
-- **Pages**: page indicator with a thumbnail strip — add, duplicate, move and delete sheets.
-- **Add space** tool: drag down to push everything below, drag up to close a gap.
-- **Pen slots**: three pens and three highlighters, each remembers colour, width and opacity.
-- **Selection**: filter by ink / objects; rotate handle (`Shift` snaps to 15°).
-- **Eraser**: erase only ink, pen or highlighter; optional auto-return to the previous tool.
-- **Highlighter** is drawn under the ink and can draw straight lines.
-- **Agent inbox**: an AI assistant can add text, pictures and pages through a separate `Name.agent.json` file next to the notebook, so it never conflicts with your own writing or with sync.
+- **Agent inbox in Markdown**: an assistant that can only write notes can now add text to a notebook through `Name.agent.md` — each `## id` section becomes a text block (Markdown and `$LaTeX$`), placed under what is already on the page.

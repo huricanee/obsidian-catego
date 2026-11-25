@@ -5,7 +5,7 @@ import { createRoot, Root } from 'react-dom/client';
 import Board from './shared/Board.jsx';
 import { CategoBoard, parseBoard, serializeBoard, emptyBoard } from './format';
 // @ts-ignore — pure ESM logic shared with the web app and the CLI
-import { parseAgentFile, AGENT_FILE_SUFFIX } from './shared/agentOps.js';
+import { parseAgentFile, parseAgentMarkdown, AGENT_FILE_SUFFIX, AGENT_MD_SUFFIX } from './shared/agentOps.js';
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif']);
 
@@ -28,7 +28,7 @@ export class CategoView extends TextFileView {
   private root: Root | null = null;
   private reload = 0;
   private bridge: Bridge = {};
-  private agentMtime = 0;
+  private agentStamp = '';
 
   // Where the board's pictures and PDFs live: ordinary vault files, referenced
   // by vault path (so they sync, back up and open like any attachment).
@@ -69,7 +69,7 @@ export class CategoView extends TextFileView {
     this.board = data.trim() ? parseBoard(data) : emptyBoard();
     this.reload += 1;
     this.renderBoard();
-    this.agentMtime = 0;
+    this.agentStamp = '';
     window.setTimeout(() => this.syncAgent(), 400);
   }
 
@@ -85,7 +85,7 @@ export class CategoView extends TextFileView {
     // Keep note-node titles/links in sync when a note is renamed/moved.
     this.registerEvent(this.app.vault.on('rename', (f, oldPath) => this.onVaultRename(f, oldPath)));
     // Agent inbox (see src/agentOps.js): apply what an AI wrote next to the board.
-    const inboxChanged = (f: any) => { if (f && f.path === this.agentPath()) this.syncAgent(); };
+    const inboxChanged = (f: any) => { if (f && (f.path === this.agentPath() || f.path === this.agentPath(AGENT_MD_SUFFIX))) this.syncAgent(); };
     this.registerEvent(this.app.vault.on('modify', inboxChanged));
     this.registerEvent(this.app.vault.on('create', inboxChanged));
     this.registerInterval(window.setInterval(() => this.syncAgent(), 5000));
@@ -139,18 +139,24 @@ export class CategoView extends TextFileView {
   // --- agent inbox -----------------------------------------------------------
   // `Name.agent.json` next to `Name.catego`: the only file an AI writes. This
   // view is the only writer of the board file, so sync never sees two writers.
-  private agentPath(): string | null {
-    return this.file ? this.file.path.replace(/\.catego$/i, '') + AGENT_FILE_SUFFIX : null;
+  // An agent that can only write notes uses `Name.agent.md` (same operations).
+  private agentPath(suffix: string = AGENT_FILE_SUFFIX): string | null {
+    return this.file ? this.file.path.replace(/\.catego$/i, '') + suffix : null;
   }
 
   private async syncAgent() {
-    const path = this.agentPath();
-    if (!path || !this.bridge.applyAgentOps) return;
+    if (!this.file || !this.bridge.applyAgentOps) return;
     try {
       const adapter = this.app.vault.adapter;
-      const stat = await adapter.stat(path);
-      if (!stat || stat.mtime === this.agentMtime) return;
-      const ops = parseAgentFile(await adapter.read(path));
+      const files: [string, (t: string) => any[]][] = [
+        [this.agentPath() as string, parseAgentFile],
+        [this.agentPath(AGENT_MD_SUFFIX) as string, parseAgentMarkdown],
+      ];
+      const stats = await Promise.all(files.map(([p]) => adapter.stat(p).catch(() => null)));
+      const stamp = stats.map((s) => (s ? s.mtime : 0)).join('/');
+      if (stamp === this.agentStamp) return;
+      let ops: any[] = [];
+      for (let i = 0; i < files.length; i++) if (stats[i]) ops = ops.concat(files[i][1](await adapter.read(files[i][0])));
       const done = this.board.agentApplied || [];
       const seen = new Set(done);
       const pending = ops.filter((o: any) => !seen.has(o.id));
@@ -162,7 +168,7 @@ export class CategoView extends TextFileView {
           new Notice(`Catego: ${applied.length} change${applied.length === 1 ? '' : 's'} from the assistant`);
         }
       }
-      this.agentMtime = stat.mtime;
+      this.agentStamp = stamp;
     } catch { /* no inbox, or unreadable — try again later */ }
   }
 
@@ -203,9 +209,11 @@ export class CategoView extends TextFileView {
     if (!(file instanceof TFile)) return;
     // The board itself moved: take its agent inbox along.
     if (this.file && file.path === this.file.path && /\.catego$/i.test(oldPath)) {
-      const from = oldPath.replace(/\.catego$/i, '') + AGENT_FILE_SUFFIX;
-      const to = this.agentPath();
-      if (to) this.app.vault.adapter.exists(from).then((yes) => (yes ? this.app.vault.adapter.rename(from, to) : undefined)).catch(() => {});
+      for (const suffix of [AGENT_FILE_SUFFIX, AGENT_MD_SUFFIX]) {
+        const from = oldPath.replace(/\.catego$/i, '') + suffix;
+        const to = this.agentPath(suffix);
+        if (to) this.app.vault.adapter.exists(from).then((yes) => (yes ? this.app.vault.adapter.rename(from, to) : undefined)).catch(() => {});
+      }
     }
     if (this.bridge.renameNote) this.bridge.renameNote(oldPath, file.path, file.basename);
   }

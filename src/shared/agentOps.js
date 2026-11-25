@@ -19,6 +19,15 @@
  *   page   { at }                                      blank sheet before page `at`
  *   delete { ids: [...] }                              remove objects by id
  *
+ * An agent that can only write notes uses `Name.agent.md` instead — the same
+ * operations as Markdown sections, no JSON escaping (see parseAgentMarkdown):
+ *
+ *   ## t1 page=new
+ *   Find $\int_0^1 x^2\,dx$.
+ *
+ * Without `y` a block is placed under whatever is already on the page (on the
+ * next sheet when the page is full); without `page`, on the last used page.
+ *
  * Objects get deterministic ids (`ag_<opId>`), so applying the same op on two
  * devices converges instead of duplicating.
  */
@@ -33,7 +42,51 @@ export function parseAgentFile(text) {
   } catch { return []; }
 }
 
+export const AGENT_MD_SUFFIX = '.agent.md';
+
+/**
+ * `## <id> key=value …` starts an operation, the lines under it are its text.
+ * `op` defaults to `text`; other keys: page, x, y, w, size, color, kind, src,
+ * at, ids (comma-separated). An id is applied once — never reuse one.
+ */
+export function parseAgentMarkdown(text) {
+  const ops = [];
+  let cur = null, body = [];
+  const flush = () => {
+    if (!cur) return;
+    const t = body.join('\n').trim();
+    if (t && cur.text == null) cur.text = t;
+    ops.push(cur);
+  };
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = /^##\s+(\S+)(.*)$/.exec(line);
+    if (!m) { if (cur) body.push(line); continue; }
+    flush();
+    cur = { id: m[1], op: 'text' }; body = [];
+    for (const kv of m[2].matchAll(/([a-z]+)=("[^"]*"|\S+)/gi)) {
+      const k = kv[1].toLowerCase();
+      const v = kv[2].replace(/^"|"$/g, '');
+      if (k === 'ids') cur.ids = v.split(',').map((x) => x.trim()).filter(Boolean);
+      else if (['x', 'y', 'w', 'h', 'size', 'at'].includes(k)) { if (Number.isFinite(Number(v))) cur[k] = Number(v); }
+      else if (['op', 'page', 'color', 'kind', 'src'].includes(k)) cur[k] = v;
+    }
+  }
+  flush();
+  return ops;
+}
+
 const snap = (v) => Math.round((Number(v) || 0) / 20) * 20;
+
+const MARGIN = 60;
+// Height of a text block whose real height only the editor knows.
+function estHeight(n) {
+  if (n.height) return n.height;
+  const w = (n.width || 220) - 16;
+  const size = n.fontSize || 14;
+  const perLine = Math.max(8, Math.floor(w / (size * 0.55)));
+  const lines = String(n.text || '').split(/\n/).reduce((sum, ln) => sum + Math.max(1, Math.ceil(ln.length / perLine)), 0);
+  return Math.max(n.style === 'text' ? 24 : 60, Math.ceil((lines * size * 1.5 + 12) / 20) * 20);
+}
 
 /** → { state, applied: [opId], changed } — pure. `done` = ids applied earlier. */
 export function applyAgentOps(state, ops, done = []) {
@@ -41,12 +94,43 @@ export function applyAgentOps(state, ops, done = []) {
   const applied = [];
   let st = { nodes: state.nodes || {}, arrows: state.arrows || {}, regions: state.regions || {}, strokes: state.strokes || [], doc: state.doc || null };
   let changed = false;
+  const pageIndex = (lay, page) => {
+    if (page === 'new' || page == null) return lay.count - 1;
+    if (page === 'last') return Math.max(0, lay.count - 2);
+    return Math.min(lay.count - 1, Math.max(0, Math.floor(Number(page)) - 1 || 0));
+  };
   const origin = (page) => {
     if (!st.doc) return { x: 0, y: 0 };
     const lay = docLayout(st.doc, st);
-    let i = page === 'new' || page == null ? lay.count - 1 : Math.max(0, Math.floor(Number(page)) - 1 || 0);
-    i = Math.min(i, lay.count - 1);
-    return { x: lay.pages[i].x, y: lay.pages[i].y };
+    const pg = lay.pages[pageIndex(lay, page)];
+    return { x: pg.x, y: pg.y };
+  };
+  // Lowest point of what lies between y0 and y1 (null = nothing there).
+  const bottomIn = (y0, y1) => {
+    let b = null;
+    const see = (top, bot) => { if (bot > y0 && top < y1) b = b == null ? bot : Math.max(b, bot); };
+    for (const n of Object.values(st.nodes)) see(n.y, n.y + estHeight(n));
+    for (const r of Object.values(st.regions)) see(r.y, r.y + (r.height || 0));
+    for (const s of st.strokes) for (const p of s.points || []) see(p.y, p.y);
+    return b;
+  };
+  // No `y` given: under whatever is on the page, or on the next sheet when full.
+  const autoPlace = (op) => {
+    const x = op.x == null ? MARGIN : Number(op.x) || 0;
+    if (!st.doc) {
+      const b = bottomIn(-Infinity, Infinity);
+      return { x, y: b == null ? 0 : b + 40, w: 700 };
+    }
+    const lay = docLayout(st.doc, st);
+    let i = pageIndex(lay, op.page == null ? 'last' : op.page);
+    for (;;) {
+      const pg = lay.pages[i];
+      const b = bottomIn(pg.y, pg.y + pg.h);
+      const y = b == null ? MARGIN : b - pg.y + 40;
+      const need = op.op === 'image' ? 200 : Math.min(400, estHeight({ text: op.text, width: op.w || pg.w - 2 * MARGIN, style: 'text', fontSize: op.size }));
+      if (y + need <= pg.h - MARGIN || b == null || i >= lay.count - 1) return { x: pg.x + x, y: pg.y + y, w: pg.w - 2 * MARGIN - (x - MARGIN) };
+      i += 1;
+    }
   };
   for (const op of ops || []) {
     if (!op || seen.has(op.id)) continue;
@@ -55,11 +139,12 @@ export function applyAgentOps(state, ops, done = []) {
     const id = `ag_${op.id}`;
     if (op.op === 'text' || op.op === 'node' || op.op === 'image') {
       if (st.nodes[id]) continue;
-      const o = origin(op.page);
-      const node = { id, x: snap(o.x + (Number(op.x) || 0)), y: snap(o.y + (Number(op.y) || 0)), text: String(op.text || ''), color: op.color || '#ffffff', agent: true };
+      const auto = op.y == null ? autoPlace(op) : null;
+      const o = auto ? { x: 0, y: 0 } : origin(op.page);
+      const node = { id, x: snap(o.x + (auto ? auto.x : Number(op.x) || 0)), y: snap(o.y + (auto ? auto.y : Number(op.y) || 0)), text: String(op.text || ''), color: op.color || '#ffffff', agent: true };
       if (op.op === 'text') {
         node.style = 'text';
-        node.width = Math.max(60, snap(op.w || 400));
+        node.width = Math.max(60, snap(op.w || (auto ? auto.w : 400)));
         if (op.size) node.fontSize = Number(op.size);
       } else if (op.op === 'node') {
         node.width = Math.max(60, snap(op.w || 220));
