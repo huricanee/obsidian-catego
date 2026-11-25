@@ -4,6 +4,8 @@ import './canvas.css';
 import 'katex/dist/katex.min.css';
 import { renderRichToHtml } from './richtext.js';
 import { NODE_KINDS, EDGE_KINDS, NODE_STATUSES, FONT_FAMILIES } from './argTypes.js';
+import { clampViewport } from './pages.js';
+import { recognizeShape } from './shapeSnap.js';
 
 export const GRID_SIZE = 20;
 const MIN_ZOOM = 0.15;
@@ -404,26 +406,50 @@ function pointsToPath(points) {
    Uses perfect-freehand to build a variable-width outline (pressure
    simulated from speed) and returns a FILLED SVG path string.
    ================================================================ */
-// Pen: holding the pointer down longer than this collapses the stroke to a
-// straight line from the press point to the cursor (press-and-hold = ruler).
-const HOLD_STRAIGHTEN_MS = 1800;
+// Pen: draw a rough line / rectangle / ellipse and HOLD STILL at the end for
+// this long — the stroke snaps to the clean shape (src/shapeSnap.js). A stroke
+// that is none of those (handwriting, squiggles) is left exactly as drawn.
+const HOLD_SNAP_MS = 450;
+const HOLD_STILL_PX = 5; // screen px the pointer may drift and still count as resting
+// Pressure of the stylus currently drawing (0–1), or null for mouse / finger.
+// Set by the touch adapter around the mouse events it synthesises, so the one
+// drawing pipeline (mouse) records real pen pressure.
+let activePenPressure = null;
+function penPoint(x, y) {
+  return activePenPressure == null ? { x, y } : { x, y, p: Math.round(activePenPressure * 1000) / 1000 };
+}
 function appendStrokePoint(cs, x, y) {
   if (!cs) return;
-  if (!cs.straight && cs.t0 != null && Date.now() - cs.t0 > HOLD_STRAIGHTEN_MS) cs.straight = true;
-  if (cs.straight) cs.points = [cs.points[0], { x, y }];
-  else cs.points.push({ x, y });
+  if (cs.shape) {
+    // Already snapped: a line's free end keeps following the pointer (so it can
+    // be aimed); a rectangle / ellipse is final.
+    if (cs.shape === 'line') cs.points = [cs.points[0], { x, y }];
+    return;
+  }
+  cs.points.push(penPoint(x, y));
 }
 
-export function gelStrokePath(points, width) {
+export function gelStrokePath(points, width, shape) {
   if (!points || points.length === 0) return '';
-  const outline = getStroke(points.map((p) => [p.x, p.y]), {
+  if (shape) {
+    // A snapped shape: constant width, no smoothing lag — corners stay corners.
+    const o = getStroke(points.map((p) => [p.x, p.y]), {
+      size: Math.max(1.5, width || 4), thinning: 0, smoothing: 0.5, streamline: 0, simulatePressure: false, last: true,
+    });
+    if (!o.length) return '';
+    return 'M ' + o.map(([x, y]) => `${x.toFixed(2)} ${y.toFixed(2)}`).join(' L ') + ' Z';
+  }
+  // Points recorded from a stylus carry real pressure (`p`); everything else
+  // gets pressure simulated from speed.
+  const real = points[0].p != null;
+  const outline = getStroke(real ? points.map((p) => [p.x, p.y, p.p == null ? 0.5 : p.p]) : points.map((p) => [p.x, p.y]), {
     // `size` is the brush diameter in px — keep it ~1:1 with the stored
     // width so strokes match the old line weight (no 3× fattening).
-    size: Math.max(1.5, width || 4),
-    thinning: 0.55,
+    size: Math.max(1.5, width || 4) * (real ? 1.25 : 1),
+    thinning: real ? 0.6 : 0.55,
     smoothing: 0.5,
-    streamline: 0.5,
-    simulatePressure: true,
+    streamline: real ? 0.35 : 0.5,
+    simulatePressure: !real,
     last: true,
   });
   if (!outline.length) return '';
@@ -560,6 +586,7 @@ function pixelEraseStrokes(strokes, cx, cy, radius) {
         points: group,
         color: stroke.color,
         width: stroke.width,
+        ...(stroke.opacity != null ? { opacity: stroke.opacity } : {}),
       });
     }
   }
@@ -583,7 +610,7 @@ function getSelectionBounds(sel, nodes, strokes, heightMap) {
     const n = nodes[id];
     if (!n) continue;
     const w = n.width || 220;
-    const h = (heightMap && heightMap[id]) || 60;
+    const h = n.height || (heightMap && heightMap[id]) || 60;
     minX = Math.min(minX, n.x);
     minY = Math.min(minY, n.y);
     maxX = Math.max(maxX, n.x + w);
@@ -660,6 +687,11 @@ export default function Canvas({
   // push imperative DOM updates into Canvas (avoiding a React re-render
   // per tick — the same pattern as mouse drag).
   kbNudgeApiRef,
+  // Paged-document layout (src/pages.js) or null for the infinite board.
+  docLayout = null,
+  // Finger gestures (touch screens): two-finger tap, long press on empty space.
+  onTwoFingerTap,
+  onFingerLongPress,
 }) {
   const rootRef = useRef(null);
   const transformRef = useRef(null);
@@ -673,6 +705,33 @@ export default function Canvas({
   useEffect(() => {
     vpRef.current = viewport;
   }, [viewport]);
+
+  // Document mode: every pan / zoom is clamped so the sheets stay on screen.
+  const docLayoutRef = useRef(docLayout);
+  useEffect(() => { docLayoutRef.current = docLayout; }, [docLayout]);
+  const clampVp = useCallback((vp) => {
+    const layout = docLayoutRef.current;
+    if (!layout || !rootRef.current) return vp;
+    const r = rootRef.current.getBoundingClientRect();
+    return clampViewport(vp, layout, r.width, r.height);
+  }, []);
+  // Imperative viewport write (DOM only — no React render per frame).
+  const writeVp = useCallback((next) => {
+    const vp = clampVp(next);
+    vpRef.current = vp;
+    if (transformRef.current) {
+      transformRef.current.style.transform = `translate(${vp.panX}px, ${vp.panY}px) scale(${vp.zoom})`;
+    }
+    const gridEl = rootRef.current?.querySelector('.canvas-grid');
+    if (gridEl) {
+      const gs = GRID_SIZE * vp.zoom;
+      gridEl.style.backgroundSize = `${gs}px ${gs}px`;
+      gridEl.style.backgroundPosition = `${vp.panX % gs}px ${vp.panY % gs}px`;
+    }
+    return vp;
+  }, [clampVp]);
+  const gestureRef = useRef({ onTwoFingerTap, onFingerLongPress });
+  useEffect(() => { gestureRef.current = { onTwoFingerTap, onFingerLongPress }; }, [onTwoFingerTap, onFingerLongPress]);
 
   /* ---- node height state for anchor position computation (state, not ref, so render can read it) ---- */
   const [nodeHeightMap, setNodeHeightMap] = useState({});
@@ -715,6 +774,30 @@ export default function Canvas({
   /* ---- Freehand drawing state ---- */
   const currentStroke = useRef(null); // { points: [{x,y},...], color, width }
   const [drawingPreview, setDrawingPreview] = useState(null); // SVG path string while drawing
+  // Draw-and-hold: called with the pointer's screen position on every draw
+  // event. Once the pointer has rested for HOLD_SNAP_MS the stroke is offered
+  // to the shape recogniser.
+  const holdRef = useRef({ timer: null, x: 0, y: 0 });
+  const cancelHold = useCallback(() => {
+    clearTimeout(holdRef.current.timer);
+    holdRef.current.timer = null;
+  }, []);
+  const touchHold = useCallback((sx, sy) => {
+    const h = holdRef.current;
+    if (h.timer && Math.hypot(sx - h.x, sy - h.y) < HOLD_STILL_PX) return; // still resting
+    clearTimeout(h.timer);
+    h.x = sx; h.y = sy;
+    h.timer = setTimeout(() => {
+      h.timer = null;
+      const cs = currentStroke.current;
+      if (!cs || cs.shape) return;
+      const found = recognizeShape(cs.points, 24 / vpRef.current.zoom);
+      if (!found) return;
+      cs.points = found.points;
+      cs.shape = found.kind;
+      setDrawingPreview(gelStrokePath(cs.points, cs.width, cs.shape));
+    }, HOLD_SNAP_MS);
+  }, []);
 
   /* ---- Dragging node id as state for CSS class ---- */
   const [draggingNodeId, setDraggingNodeId] = useState(null);
@@ -747,25 +830,14 @@ export default function Canvas({
     let newZoom = vp.zoom * factor;
     newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
     const scale = newZoom / vp.zoom;
-    const newPanX = cx - (cx - vp.panX) * scale;
-    const newPanY = cy - (cy - vp.panY) * scale;
     // Update vpRef + DOM directly (no React re-render per zoom frame)
-    vpRef.current = { zoom: newZoom, panX: newPanX, panY: newPanY };
-    if (transformRef.current) {
-      transformRef.current.style.transform = `translate(${newPanX}px, ${newPanY}px) scale(${newZoom})`;
-    }
-    const gridEl = rootRef.current?.querySelector('.canvas-grid');
-    if (gridEl) {
-      const gs = GRID_SIZE * newZoom;
-      gridEl.style.backgroundSize = `${gs}px ${gs}px`;
-      gridEl.style.backgroundPosition = `${newPanX % gs}px ${newPanY % gs}px`;
-    }
+    writeVp({ zoom: newZoom, panX: cx - (cx - vp.panX) * scale, panY: cy - (cy - vp.panY) * scale });
     // Debounce React state sync
     clearTimeout(zoomSyncTimer.current);
     zoomSyncTimer.current = setTimeout(() => {
       onUpdateViewport({ ...vpRef.current });
     }, 150);
-  }, [onUpdateViewport]);
+  }, [onUpdateViewport, writeVp]);
 
   /* ================================================================
      Wheel handler - Ctrl/Meta = zoom, otherwise pan
@@ -795,17 +867,7 @@ export default function Canvas({
         // calling setState on each one causes React to diff 30+ KaTeX
         // DOM trees per frame, causing severe lag.
         const vp = vpRef.current;
-        const newPanX = vp.panX - e.deltaX;
-        const newPanY = vp.panY - e.deltaY;
-        vpRef.current = { ...vp, panX: newPanX, panY: newPanY };
-        if (transformRef.current) {
-          transformRef.current.style.transform = `translate(${newPanX}px, ${newPanY}px) scale(${vp.zoom})`;
-        }
-        const gridEl = el.querySelector('.canvas-grid');
-        if (gridEl) {
-          const gs = GRID_SIZE * vp.zoom;
-          gridEl.style.backgroundPosition = `${newPanX % gs}px ${newPanY % gs}px`;
-        }
+        writeVp({ ...vp, panX: vp.panX - e.deltaX, panY: vp.panY - e.deltaY });
         // Sync React state after scrolling stops (150ms debounce)
         clearTimeout(wheelSyncTimer);
         wheelSyncTimer = setTimeout(() => {
@@ -816,76 +878,224 @@ export default function Canvas({
 
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [applyZoom, onUpdateViewport]);
+  }, [applyZoom, onUpdateViewport, writeVp]);
 
   /* ================================================================
-     Touch handling — DESKTOP (existing, unchanged)
+     Touch + stylus — wide screens (iPad, touch laptops)
+     The desktop interaction model is mouse-driven and complete, so instead
+     of a second implementation the stylus is REPLAYED through it as
+     synthetic mouse events (with its pressure riding along). Fingers:
+       · 1 finger on empty space        → pan (tap = click, long press = pen options)
+       · 1 finger on an object          → acts like the mouse (drag, resize, …)
+       · 2 fingers                      → pinch-zoom + pan; a two-finger TAP
+                                          toggles eraser ⇄ last tool
+     Once a stylus has touched the board, fingers never draw or erase —
+     they only navigate (palm rejection: fingers are ignored while the pen
+     is down).
      ================================================================ */
   useEffect(() => {
-    if (isMobile) return; // mobile has its own handler below
+    if (isMobile) return; // phones have their own handler below
     const el = rootRef.current;
     if (!el) return;
+    const win = el.ownerDocument.defaultView || window;
 
-    let lastTouches = null;
+    const TAP_MS = 350, TAP_MOVE = 12, LONG_MS = 550;
+    const BG_CLASSES = ['canvas-grid', 'canvas-transform', 'drawing-layer', 'eraser-hit-layer', 'select-hit-layer'];
+    let penSeen = false;
+    let g = null;        // the gesture in progress
+    let lastTap = null;  // { t, x, y } — for double-tap → dblclick
+
+    const isStylus = (t) => t.touchType === 'stylus';
+    const isBackground = (target) => target === el
+      || !!(target && target.classList && BG_CLASSES.some((c) => target.classList.contains(c)));
+    const find = (list, id) => { for (const t of list) if (t.identifier === id) return t; return null; };
+    const fire = (type, t, target) => {
+      (target || el).dispatchEvent(new win.MouseEvent(type, {
+        bubbles: true, cancelable: true, view: win, detail: type === 'dblclick' ? 2 : 1,
+        clientX: t.clientX, clientY: t.clientY, screenX: t.screenX, screenY: t.screenY,
+        button: 0, buttons: type === 'mousedown' || type === 'mousemove' ? 1 : 0,
+      }));
+    };
+    const pressureOf = (t) => (isStylus(t) && t.force > 0 ? Math.min(1, t.force) : null);
+    const commitVp = () => onUpdateViewport({ ...vpRef.current });
+    const clearLong = () => { if (g && g.longTimer) { clearTimeout(g.longTimer); g.longTimer = null; } };
+
+    function startMouse(t, stylus) {
+      g = { type: 'mouse', id: t.identifier, stylus, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY, t0: Date.now(), moved: false };
+      activePenPressure = pressureOf(t);
+      fire('mousedown', t, t.target);
+    }
+    function endMouse(t, cancelled) {
+      const point = t || { clientX: g.lastX, clientY: g.lastY, screenX: 0, screenY: 0 };
+      fire('mouseup', point);
+      activePenPressure = null;
+      const wasTap = !cancelled && !g.moved && Date.now() - g.t0 < TAP_MS * 2;
+      g = null;
+      if (!wasTap) return;
+      const target = el.ownerDocument.elementFromPoint(point.clientX, point.clientY) || el;
+      fire('click', point, target);
+      const now = Date.now();
+      if (lastTap && now - lastTap.t < TAP_MS && Math.hypot(point.clientX - lastTap.x, point.clientY - lastTap.y) < 30) {
+        fire('dblclick', point, target);
+        lastTap = null;
+      } else {
+        lastTap = { t: now, x: point.clientX, y: point.clientY };
+      }
+    }
+    function startPan(t) {
+      g = { type: 'pan', id: t.identifier, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY, t0: Date.now(), moved: false, maxTouches: 1, longTimer: null };
+      const mine = g;
+      g.longTimer = setTimeout(() => {
+        if (g !== mine || g.type !== 'pan' || g.moved) return;
+        g.moved = true; // no tap afterwards
+        gestureRef.current.onFingerLongPress?.({ x: mine.startX, y: mine.startY });
+      }, LONG_MS);
+    }
+    function startPinch(a, b, from) {
+      g = {
+        type: 'pinch', ids: [a.identifier, b.identifier],
+        last: [{ x: a.clientX, y: a.clientY }, { x: b.clientX, y: b.clientY }],
+        start: [{ x: a.clientX, y: a.clientY }, { x: b.clientX, y: b.clientY }],
+        t0: from ? from.t0 : Date.now(),
+        moved: from ? from.moved : false,
+        maxTouches: 2,
+      };
+    }
 
     function onTouchStart(e) {
-      if (e.touches.length === 1) {
-        lastTouches = [{ x: e.touches[0].clientX, y: e.touches[0].clientY }];
-      } else if (e.touches.length === 2) {
-        e.preventDefault();
-        lastTouches = [
-          { x: e.touches[0].clientX, y: e.touches[0].clientY },
-          { x: e.touches[1].clientX, y: e.touches[1].clientY },
-        ];
+      const target = e.target;
+      // Let native handle text being edited and real controls.
+      if (target.closest && (target.closest('[contenteditable="true"]') || target.closest('input, textarea, select, button, a'))) return;
+      e.preventDefault();
+      e.stopPropagation(); // keep the host app's swipe gestures (Obsidian sidebars) out of it
+
+      for (const t of e.changedTouches) {
+        if (g && g.type === 'mouse' && g.stylus) continue; // palm while writing
+        if (isStylus(t)) {
+          penSeen = true;
+          if (g) { // fingers were navigating — the pen takes over
+            clearLong();
+            if (g.type === 'mouse') endMouse(null, true); else { commitVp(); g = null; }
+          }
+          startMouse(t, true);
+          continue;
+        }
+        if (!g) {
+          const tool = toolModeRef.current;
+          const drawing = tool === 'draw' || tool === 'eraser';
+          const placing = tool === 'node' || tool === 'region' || tool === 'figure' || tool === 'arrow';
+          const bg = isBackground(t.target);
+          const actAsMouse = penSeen ? (!drawing && !bg) : (drawing || placing || !bg);
+          if (actAsMouse) startMouse(t, false); else startPan(t);
+        } else if (g.type === 'pan') {
+          clearLong();
+          const first = find(e.touches, g.id);
+          if (first) startPinch(first, t, g);
+        } else if (g.type === 'mouse') {
+          // A second finger turns a finger-drag into a pinch. Drop a stroke
+          // that was only just begun rather than leaving a stray dot.
+          const first = find(e.touches, g.id);
+          if (dragState.current && dragState.current.type === 'draw') { currentStroke.current = null; setDrawingPreview(null); }
+          const from = { t0: g.t0, moved: g.moved };
+          endMouse(first, true);
+          if (first) startPinch(first, t, from);
+        } else if (g.type === 'pinch') {
+          g.maxTouches = Math.max(g.maxTouches, e.touches.length);
+        }
       }
     }
 
     function onTouchMove(e) {
-      if (!lastTouches) return;
-      if (e.touches.length === 1 && lastTouches.length === 1) {
-        if (dragState.current) return;
-        const dx = e.touches[0].clientX - lastTouches[0].x;
-        const dy = e.touches[0].clientY - lastTouches[0].y;
+      if (!g) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (g.type === 'mouse') {
+        const t = find(e.touches, g.id);
+        if (!t) return;
+        if (!g.moved && Math.hypot(t.clientX - g.startX, t.clientY - g.startY) > TAP_MOVE) g.moved = true;
+        g.lastX = t.clientX; g.lastY = t.clientY;
+        if (g.stylus) { const p = pressureOf(t); if (p != null) activePenPressure = p; }
+        fire('mousemove', t);
+      } else if (g.type === 'pan') {
+        const t = find(e.touches, g.id);
+        if (!t) return;
+        if (!g.moved && Math.hypot(t.clientX - g.startX, t.clientY - g.startY) < TAP_MOVE / 2) return;
+        if (!g.moved) { g.moved = true; clearLong(); g.lastX = t.clientX; g.lastY = t.clientY; return; }
         const vp = vpRef.current;
-        onUpdateViewport({ ...vp, panX: vp.panX + dx, panY: vp.panY + dy });
-        lastTouches = [{ x: e.touches[0].clientX, y: e.touches[0].clientY }];
-      } else if (e.touches.length === 2 && lastTouches.length === 2) {
-        e.preventDefault();
-        const prev = lastTouches;
-        const cur = [
-          { x: e.touches[0].clientX, y: e.touches[0].clientY },
-          { x: e.touches[1].clientX, y: e.touches[1].clientY },
-        ];
-        const prevDist = Math.sqrt((prev[1].x - prev[0].x) ** 2 + (prev[1].y - prev[0].y) ** 2);
-        const curDist = Math.sqrt((cur[1].x - cur[0].x) ** 2 + (cur[1].y - cur[0].y) ** 2);
+        writeVp({ ...vp, panX: vp.panX + (t.clientX - g.lastX), panY: vp.panY + (t.clientY - g.lastY) });
+        g.lastX = t.clientX; g.lastY = t.clientY;
+      } else if (g.type === 'pinch') {
+        const a = find(e.touches, g.ids[0]), b = find(e.touches, g.ids[1]);
+        if (!a || !b) return;
+        const cur = [{ x: a.clientX, y: a.clientY }, { x: b.clientX, y: b.clientY }];
+        if (!g.moved) {
+          const d0 = Math.hypot(cur[0].x - g.start[0].x, cur[0].y - g.start[0].y);
+          const d1 = Math.hypot(cur[1].x - g.start[1].x, cur[1].y - g.start[1].y);
+          if (d0 < TAP_MOVE && d1 < TAP_MOVE) return;
+          g.moved = true; g.last = cur; return;
+        }
         const rect = el.getBoundingClientRect();
-        const cx = (cur[0].x + cur[1].x) / 2 - rect.left;
-        const cy = (cur[0].y + cur[1].y) / 2 - rect.top;
-        const factor = curDist / (prevDist || 1);
-        applyZoom(factor, cx, cy);
-
-        const prevCx = (prev[0].x + prev[1].x) / 2 - rect.left;
-        const prevCy = (prev[0].y + prev[1].y) / 2 - rect.top;
+        const prev = g.last;
+        const prevDist = Math.hypot(prev[1].x - prev[0].x, prev[1].y - prev[0].y) || 1;
+        const curDist = Math.hypot(cur[1].x - cur[0].x, cur[1].y - cur[0].y) || 1;
+        const pmx = (prev[0].x + prev[1].x) / 2 - rect.left, pmy = (prev[0].y + prev[1].y) / 2 - rect.top;
+        const cmx = (cur[0].x + cur[1].x) / 2 - rect.left, cmy = (cur[0].y + cur[1].y) / 2 - rect.top;
         const vp = vpRef.current;
-        onUpdateViewport({ ...vp, panX: vp.panX + (cx - prevCx), panY: vp.panY + (cy - prevCy) });
-
-        lastTouches = cur;
+        const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, vp.zoom * (curDist / prevDist)));
+        const k = zoom / vp.zoom;
+        writeVp({ zoom, panX: cmx - (pmx - vp.panX) * k, panY: cmy - (pmy - vp.panY) * k });
+        g.last = cur;
       }
     }
 
-    function onTouchEnd() {
-      lastTouches = null;
+    function finish(e, cancelled) {
+      if (!g) return;
+      if (g.type === 'mouse') {
+        const t = find(e.changedTouches, g.id);
+        if (t) endMouse(t, cancelled);
+      } else if (g.type === 'pan') {
+        const t = find(e.changedTouches, g.id);
+        if (!t) return;
+        clearLong();
+        const done = g;
+        g = null;
+        if (done.moved || cancelled) { commitVp(); return; }
+        // A finger tap on empty space is a click there (deselects) — except
+        // with a drawing tool, where a click would start a stroke.
+        const tool = toolModeRef.current;
+        if (tool === 'draw' || tool === 'eraser') return;
+        const target = el.ownerDocument.elementFromPoint(t.clientX, t.clientY) || el;
+        fire('mousedown', t, target); fire('mouseup', t); fire('click', t, target);
+      } else if (g.type === 'pinch') {
+        if (e.touches.length >= 2 && find(e.touches, g.ids[0]) && find(e.touches, g.ids[1])) return;
+        const done = g;
+        g = null;
+        if (!done.moved && !cancelled && done.maxTouches === 2 && Date.now() - done.t0 < TAP_MS) {
+          gestureRef.current.onTwoFingerTap?.();
+        } else {
+          commitVp();
+        }
+        // One finger still down: keep panning with it.
+        const rest = find(e.touches, done.ids[0]) || find(e.touches, done.ids[1]);
+        if (rest) { startPan(rest); clearLong(); g.moved = true; }
+      }
     }
+    const onTouchEnd = (e) => finish(e, false);
+    const onTouchCancel = (e) => finish(e, true);
 
     el.addEventListener('touchstart', onTouchStart, { passive: false });
     el.addEventListener('touchmove', onTouchMove, { passive: false });
-    el.addEventListener('touchend', onTouchEnd);
+    el.addEventListener('touchend', onTouchEnd, { passive: false });
+    el.addEventListener('touchcancel', onTouchCancel, { passive: false });
     return () => {
+      clearLong();
+      activePenPressure = null;
       el.removeEventListener('touchstart', onTouchStart);
       el.removeEventListener('touchmove', onTouchMove);
       el.removeEventListener('touchend', onTouchEnd);
+      el.removeEventListener('touchcancel', onTouchCancel);
     };
-  }, [isMobile, applyZoom, onUpdateViewport]);
+  }, [isMobile, onUpdateViewport, writeVp]);
 
   /* ================================================================
      Touch handling — MOBILE
@@ -1147,8 +1357,9 @@ export default function Canvas({
 
         if (touchStateRef.current.type === 'draw') {
           if (currentStroke.current) {
+            touchHold(t.clientX, t.clientY);
             appendStrokePoint(currentStroke.current, wx, wy);
-            setDrawingPreview(gelStrokePath(currentStroke.current.points, currentStroke.current.width));
+            setDrawingPreview(gelStrokePath(currentStroke.current.points, currentStroke.current.width, currentStroke.current.shape));
           }
         } else if (touchStateRef.current.type === 'erase') {
           setEraserCursor({ x: wx, y: wy });
@@ -1268,6 +1479,7 @@ export default function Canvas({
 
       if (e.touches.length === 0) {
         if (touchStateRef.current.type === 'draw') {
+          cancelHold();
           if (currentStroke.current && currentStroke.current.points.length > 1 && onAddStroke) {
             onAddStroke({ ...currentStroke.current });
           }
@@ -1436,9 +1648,10 @@ export default function Canvas({
     if (toolMode === 'draw') {
       // Start freehand drawing
       e.preventDefault();
-      currentStroke.current = { points: [{ x: world.x, y: world.y }], color: drawColor || '#cf7bf0', width: drawWidth || 2, opacity: drawOpacity == null ? 100 : drawOpacity, t0: Date.now(), straight: false };
+      currentStroke.current = { points: [penPoint(world.x, world.y)], color: drawColor || '#cf7bf0', width: drawWidth || 2, opacity: drawOpacity == null ? 100 : drawOpacity, t0: Date.now(), straight: false };
       dragState.current = { type: 'draw' };
-      setDrawingPreview(gelStrokePath([{ x: world.x, y: world.y }], (currentStroke.current && currentStroke.current.width) || drawWidthRef.current || 2));
+      touchHold(e.clientX, e.clientY);
+      setDrawingPreview(gelStrokePath(currentStroke.current.points, (currentStroke.current && currentStroke.current.width) || drawWidthRef.current || 2));
       return;
     }
 
@@ -1866,8 +2079,9 @@ export default function Canvas({
         const worldX = (mx - vp.panX) / vp.zoom;
         const worldY = (my - vp.panY) / vp.zoom;
         if (currentStroke.current) {
+          touchHold(e.clientX, e.clientY);
           appendStrokePoint(currentStroke.current, worldX, worldY);
-          setDrawingPreview(gelStrokePath(currentStroke.current.points, currentStroke.current.width));
+          setDrawingPreview(gelStrokePath(currentStroke.current.points, currentStroke.current.width, currentStroke.current.shape));
         }
         return;
       }
@@ -1992,22 +2206,40 @@ export default function Canvas({
         return;
       }
 
+      if (ds.type === 'selResize') {
+        // Scale the whole selection uniformly about its top-left corner.
+        const vp = vpRef.current;
+        const wx = (mx - vp.panX) / vp.zoom;
+        const wy = (my - vp.panY) / vp.zoom;
+        const b = ds.bounds;
+        const sx = b.w > 1 ? (wx - b.x) / b.w : 0;
+        const sy = b.h > 1 ? (wy - b.y) / b.h : 0;
+        const k = Math.min(10, Math.max(0.1, Math.max(sx, sy)));
+        if (Math.abs(k - ds.scale) < 0.004) return;
+        ds.scale = k;
+        for (const n of ds.nodes) {
+          onUpdateNode(n.id, {
+            x: snap(b.x + (n.x - b.x) * k), y: snap(b.y + (n.y - b.y) * k),
+            width: Math.max(60, snap(n.width * k)), height: Math.max(40, snap(n.height * k)),
+            fitWidth: false,
+          });
+        }
+        if (onUpdateStrokeRef.current) {
+          for (const st of ds.strokes) {
+            onUpdateStrokeRef.current(st.id, {
+              points: st.points.map((pt) => ({ ...pt, x: b.x + (pt.x - b.x) * k, y: b.y + (pt.y - b.y) * k })),
+              width: Math.max(0.5, Math.round(st.width * k * 100) / 100),
+            });
+          }
+        }
+        return;
+      }
+
       if (ds.type === 'pan') {
         // Update transform directly via DOM — no React re-render during pan.
         // This is critical for boards with many KaTeX nodes where React diffing
         // 30+ complex DOM trees per frame causes severe lag.
-        const newPanX = ds.startPanX + (mx - ds.startX);
-        const newPanY = ds.startPanY + (my - ds.startY);
-        vpRef.current = { ...vpRef.current, panX: newPanX, panY: newPanY };
-        if (transformRef.current) {
-          transformRef.current.style.transform = `translate(${newPanX}px, ${newPanY}px) scale(${vpRef.current.zoom})`;
-        }
-        // Update grid background position directly
-        const gridEl = rootRef.current?.querySelector('.canvas-grid');
-        if (gridEl) {
-          const gs = GRID_SIZE * vpRef.current.zoom;
-          gridEl.style.backgroundPosition = `${newPanX % gs}px ${newPanY % gs}px`;
-        }
+        writeVp({ ...vpRef.current, panX: ds.startPanX + (mx - ds.startX), panY: ds.startPanY + (my - ds.startY) });
       } else if (ds.type === 'node') {
         const vp = vpRef.current;
         const worldX = (mx - vp.panX) / vp.zoom;
@@ -2287,7 +2519,7 @@ export default function Canvas({
           const sdx = newRegX - ds.startRegX, sdy = newRegY - ds.startRegY;
           for (const cs of ds.containedStrokes) {
             onUpdateStrokeRef.current(cs.id, {
-              points: cs.points.map(p => ({ x: p.x + sdx, y: p.y + sdy })),
+              points: cs.points.map(p => ({ ...p, x: p.x + sdx, y: p.y + sdy })),
             });
           }
         }
@@ -2330,6 +2562,7 @@ export default function Canvas({
         }
       }
       if (ds && ds.type === 'draw') {
+        cancelHold();
         if (currentStroke.current && currentStroke.current.points.length > 1 && onAddStroke) {
           onAddStroke({ ...currentStroke.current });
         }
@@ -2388,7 +2621,7 @@ export default function Canvas({
           // Start panning instead
         }
       }
-      if (ds && ds.type === 'selectionDrag') {
+      if (ds && (ds.type === 'selectionDrag' || ds.type === 'selResize')) {
         onSelectionDragEnd();
       }
       if (ds && ds.type === 'resize') {
@@ -2830,18 +3063,8 @@ export default function Canvas({
   /* ---- Imperative pan (keyboard scrolling of the canvas) ---- */
   const kbPan = useCallback((dx, dy) => {
     const vp = vpRef.current;
-    const newPanX = vp.panX + dx;
-    const newPanY = vp.panY + dy;
-    vpRef.current = { ...vp, panX: newPanX, panY: newPanY };
-    if (transformRef.current) {
-      transformRef.current.style.transform = `translate(${newPanX}px, ${newPanY}px) scale(${vp.zoom})`;
-    }
-    const gridEl = rootRef.current?.querySelector('.canvas-grid');
-    if (gridEl) {
-      const gs = GRID_SIZE * vp.zoom;
-      gridEl.style.backgroundPosition = `${newPanX % gs}px ${newPanY % gs}px`;
-    }
-  }, []);
+    writeVp({ ...vp, panX: vp.panX + dx, panY: vp.panY + dy });
+  }, [writeVp]);
   const kbPanCommit = useCallback(() => {
     onUpdateViewport({ ...vpRef.current });
   }, [onUpdateViewport]);
@@ -2866,19 +3089,8 @@ export default function Canvas({
     const scale = newZoom / vp.zoom;
     const cx = window.innerWidth / 2;
     const cy = window.innerHeight / 2;
-    const newPanX = cx - (cx - vp.panX) * scale;
-    const newPanY = cy - (cy - vp.panY) * scale;
-    vpRef.current = { zoom: newZoom, panX: newPanX, panY: newPanY };
-    if (transformRef.current) {
-      transformRef.current.style.transform = `translate(${newPanX}px, ${newPanY}px) scale(${newZoom})`;
-    }
-    const gridEl = rootRef.current?.querySelector('.canvas-grid');
-    if (gridEl) {
-      const gs = GRID_SIZE * newZoom;
-      gridEl.style.backgroundPosition = `${newPanX % gs}px ${newPanY % gs}px`;
-      gridEl.style.backgroundSize = `${gs}px ${gs}px`;
-    }
-  }, []);
+    writeVp({ zoom: newZoom, panX: cx - (cx - vp.panX) * scale, panY: cy - (cy - vp.panY) * scale });
+  }, [writeVp]);
   const kbZoomCommit = useCallback(() => {
     onUpdateViewport({ ...vpRef.current });
   }, [onUpdateViewport]);
@@ -3811,14 +4023,31 @@ export default function Canvas({
     : '';
 
   // Compute stroke selection bounding box for visual indicator
-  const strokeSelBounds = (selection.strokeIds.size > 0)
-    ? getSelectionBounds({ nodeIds: new Set(), strokeIds: selection.strokeIds }, {}, drawStrokes, nodeHeightMap)
+  // …for any group: strokes, or two or more nodes. Its corner handle scales
+  // the whole selection.
+  const strokeSelBounds = (selection.strokeIds.size > 0 || selection.nodeIds.size > 1)
+    ? getSelectionBounds(selection, nodes, drawStrokes, nodeHeightMap)
     : null;
+  const onSelResizeMouseDown = (e) => {
+    if (e.button !== 0 || !strokeSelBounds) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const hm = nodeHeightRef.current;
+    dragState.current = {
+      type: 'selResize',
+      bounds: strokeSelBounds,
+      scale: 1,
+      nodes: [...selection.nodeIds].map((id) => nodes[id]).filter(Boolean)
+        .map((n) => ({ id: n.id, x: n.x, y: n.y, width: n.width || 220, height: n.height || hm[n.id] || 60 })),
+      strokes: (drawStrokes || []).filter((st) => selection.strokeIds.has(st.id))
+        .map((st) => ({ id: st.id, points: st.points, width: st.width || 2 })),
+    };
+  };
 
   return (
     <div
       ref={rootRef}
-      className={`canvas-root${isOverview ? ' overview' : ''}${cursorClass}`}
+      className={`canvas-root${isOverview ? ' overview' : ''}${cursorClass}${docLayout ? ' doc-mode' : ''}`}
       onMouseDown={onCanvasMouseDown}
       onDoubleClick={toolMode === 'select' ? onCanvasDoubleClick : undefined}
       onMouseLeave={onCanvasMouseLeave}
@@ -3839,6 +4068,18 @@ export default function Canvas({
           transform: `translate(${panX}px, ${panY}px) scale(${zoom})`,
         }}
       >
+        {/* Sheets of a paged document (behind everything, never a click target) */}
+        {docLayout && (
+          <div className="page-layer">
+            {docLayout.pages.map((pg, i) => (
+              <div key={i} className={`doc-page bg-${docLayout.bg}`}
+                style={{ left: pg.x, top: pg.y, width: pg.w, height: pg.h }}>
+                <span className="doc-page-num">{i + 1}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Regions layer */}
         <div className="region-layer">
           {Object.values(regions).map((region) => {
@@ -3942,7 +4183,7 @@ export default function Canvas({
                 style={{ pointerEvents: toolMode === 'select' ? 'stroke' : 'none', cursor: 'pointer' }}
               />
               <path
-                d={gelStrokePath(stroke.points, stroke.width)}
+                d={gelStrokePath(stroke.points, stroke.width, stroke.shape)}
                 className={`freehand-stroke gel${selection.strokeIds.has(stroke.id) ? ' in-selection' : ''}`}
                 fill={stroke.color || '#cf7bf0'}
                 fillOpacity={(stroke.opacity == null ? 100 : stroke.opacity) / 100}
@@ -4005,6 +4246,20 @@ export default function Canvas({
               opacity={0.6}
             />
           </svg>
+        )}
+        {strokeSelBounds && toolMode === 'select' && (
+          <div
+            className="sel-resize-handle"
+            title="Drag to resize the selection"
+            style={{
+              left: strokeSelBounds.x + strokeSelBounds.w + 4 / zoom,
+              top: strokeSelBounds.y + strokeSelBounds.h + 4 / zoom,
+              width: 14 / zoom, height: 14 / zoom,
+              marginLeft: -7 / zoom, marginTop: -7 / zoom,
+              borderWidth: 2 / zoom,
+            }}
+            onMouseDown={onSelResizeMouseDown}
+          />
         )}
 
         {/* Eraser cursor circle - radius converted to world units */}

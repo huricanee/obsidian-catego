@@ -18,6 +18,8 @@ export interface CategoBoard {
   strokes: any[];
   /** nodeId -> vault path of the note this node is backed by. */
   notes: Record<string, string>;
+  /** Paged-document setup (src/pages.js); null/absent = infinite board. */
+  doc?: any;
 }
 
 const EXTRAS_SENTINEL = '%%catego:extras';
@@ -43,6 +45,7 @@ export function serializeBoard(board: CategoBoard): string {
     nodes: board.nodes,
     arrows: board.arrows,
     regions: board.regions,
+    doc: board.doc || null,
   }).text;
   const extras = {
     version: 2,
@@ -52,6 +55,7 @@ export function serializeBoard(board: CategoBoard): string {
       arrows: board.arrows || {},
       regions: board.regions || {},
       strokes: board.strokes || [],
+      doc: board.doc || null,
     },
   };
   return `${dsl}\n\n${EXTRAS_SENTINEL}\n${JSON.stringify(extras)}\n`;
@@ -106,6 +110,7 @@ export function parseBoard(text: string): CategoBoard {
       regions: extras.full.regions || {},
       strokes: extras.full.strokes || [],
       notes: extras.notes || {},
+      doc: extras.full.doc || null,
     };
   }
 
@@ -144,7 +149,7 @@ export function parseBoard(text: string): CategoBoard {
     arrows[id] = arrow;
   }
 
-  return { nodes, arrows, regions, strokes: extras.strokes || [], notes: extras.notes || {} };
+  return { nodes, arrows, regions, strokes: extras.strokes || [], notes: extras.notes || {}, doc: parsed.doc || null };
 }
 
 // --- note → node ---------------------------------------------------------

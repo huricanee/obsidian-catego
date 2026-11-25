@@ -11,8 +11,8 @@
  *     word wrapping. Wide text simply clips.
  *   - LaTeX (`$...$`) is rendered as literal source text. Embedding
  *     KaTeX into the exported SVG was rejected as out-of-scope.
- *   - Freehand strokes, regions, toolbar, cursors, anchor dots,
- *     resize handles and selection halos are intentionally skipped.
+ *   - Toolbar, cursors, anchor dots, resize handles and selection
+ *     halos are intentionally skipped.
  */
 
 import {
@@ -27,6 +27,7 @@ import {
   snapAngle,
   notSideFor,
   notStripPath,
+  gelStrokePath,
 } from './Canvas.jsx';
 import { NODE_KINDS, EDGE_KINDS, NODE_STATUSES, FONT_FAMILIES } from './argTypes.js';
 
@@ -120,6 +121,10 @@ function computeBounds(state) {
     const { midX, midY } = bezierPath(from.x, from.y, from.anchor, to.x, to.y, to.anchor, arrow.fromCtrl, arrow.toCtrl);
     acc(midX - 15, midY - 15);
     acc(midX + 15, midY + 15);
+  }
+
+  for (const st of state.strokes || []) {
+    for (const pt of st.points || []) acc(pt.x, pt.y);
   }
 
   if (minX === Infinity) {
@@ -521,7 +526,62 @@ function renderArrow(arrow, state, theme) {
 }
 
 /* ----------------------------------------------------------------
+   Freehand strokes — the same gel outline as on screen. The light theme
+   is a lightness inversion on screen, so mirror it for stroke colours
+   (white ink must come out dark on white paper).
+   ---------------------------------------------------------------- */
+function flipLightness(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').replace(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/i, '#$1$1$2$2$3$3'));
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2, d = max - min;
+  let h = 0, sat = 0;
+  if (d) {
+    sat = d / (1 - Math.abs(2 * l - 1));
+    if (max === r) h = ((g - b) / d) % 6; else if (max === g) h = (b - r) / d + 2; else h = (r - g) / d + 4;
+  }
+  const l2 = 1 - l;
+  const c = (1 - Math.abs(2 * l2 - 1)) * sat, x = c * (1 - Math.abs((h % 2 + 2) % 2 - 1)), mm = l2 - c / 2;
+  const hh = (h + 6) % 6;
+  const [r2, g2, b2] = hh < 1 ? [c, x, 0] : hh < 2 ? [x, c, 0] : hh < 3 ? [0, c, x] : hh < 4 ? [0, x, c] : hh < 5 ? [x, 0, c] : [c, 0, x];
+  const to = (v) => Math.round((v + mm) * 255).toString(16).padStart(2, '0');
+  return `#${to(r2)}${to(g2)}${to(b2)}`;
+}
+
+function renderStrokes(strokes, light) {
+  return (strokes || []).map((st) => {
+    const d = gelStrokePath(st.points, st.width, st.shape);
+    if (!d) return '';
+    const color = light ? flipLightness(st.color || '#cf7bf0') : (st.color || '#cf7bf0');
+    const op = (st.opacity == null ? 100 : st.opacity) / 100;
+    return `<path d="${d}" fill="${color}" fill-opacity="${op}"/>`;
+  }).join('');
+}
+
+// A sheet of a paged document: paper + its ruling.
+function renderPaper(rect, bg, light) {
+  const paper = light ? '#ffffff' : '#111114';
+  const rule = light ? 'rgba(0,0,0,0.13)' : 'rgba(255,255,255,0.09)';
+  const { x, y, w, h } = rect;
+  const parts = [`<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${paper}"/>`];
+  if (bg === 'ruled' || bg === 'grid') {
+    const step = bg === 'ruled' ? 40 : 20;
+    for (let yy = y + step; yy < y + h; yy += step) parts.push(`<line x1="${x}" y1="${yy}" x2="${x + w}" y2="${yy}" stroke="${rule}" stroke-width="1"/>`);
+    if (bg === 'grid') for (let xx = x + step; xx < x + w; xx += step) parts.push(`<line x1="${xx}" y1="${y}" x2="${xx}" y2="${y + h}" stroke="${rule}" stroke-width="1"/>`);
+  } else if (bg === 'dots') {
+    const dot = light ? 'rgba(0,0,0,0.28)' : 'rgba(255,255,255,0.22)';
+    for (let yy = y + 20; yy < y + h; yy += 20) for (let xx = x + 20; xx < x + w; xx += 20) parts.push(`<circle cx="${xx}" cy="${yy}" r="1" fill="${dot}"/>`);
+  }
+  return parts.join('');
+}
+
+/* ----------------------------------------------------------------
    Public: build the full SVG string for a board state.
+
+   `options.rect` { x, y, w, h } → export exactly that world rectangle
+   (one sheet of a paged document); `options.paper` = its ruling.
 
    `options.viewportOnly` (default true) → export the world-coords
    rectangle that's currently visible on screen, so the user gets a
@@ -534,7 +594,9 @@ export function buildExportSvg(state, options = {}) {
   const viewportOnly = options.viewportOnly !== false;
 
   let bb;
-  if (viewportOnly && state.viewport && typeof window !== 'undefined') {
+  if (options.rect) {
+    bb = options.rect;
+  } else if (viewportOnly && state.viewport && typeof window !== 'undefined') {
     // Convert the on-screen viewport rect into world coordinates. Screen
     // point (sx, sy) maps to world ((sx - panX) / zoom, (sy - panY) / zoom).
     const { panX, panY, zoom } = state.viewport;
@@ -564,7 +626,7 @@ export function buildExportSvg(state, options = {}) {
   // resolution the user is looking at (modulo pixelRatio bump). For full-
   // board export the SVG size is just the bbox in world units.
   let outW, outH;
-  if (viewportOnly && typeof window !== 'undefined') {
+  if (!options.rect && viewportOnly && typeof window !== 'undefined') {
     outW = window.innerWidth;
     outH = window.innerHeight;
   } else {
@@ -577,10 +639,12 @@ export function buildExportSvg(state, options = {}) {
       `width="${outW}" height="${outH}" ` +
       `viewBox="${bb.x} ${bb.y} ${bb.w} ${bb.h}">` +
       `<rect x="${bb.x}" y="${bb.y}" width="${bb.w}" height="${bb.h}" fill="${theme.bg}"/>` +
-      // Z-order matches on-screen: regions (back) → arrows → nodes (front)
+      (options.rect && options.paper ? renderPaper(bb, options.paper, light) : '') +
+      // Z-order matches on-screen: regions (back) → arrows → nodes → ink (front)
       `<g>${regionSvg}</g>` +
       `<g>${arrowSvg}</g>` +
       `<g>${nodeSvg}</g>` +
+      `<g>${renderStrokes(state.strokes, light)}</g>` +
     `</svg>`
   );
 }

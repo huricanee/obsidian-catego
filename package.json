@@ -1,6 +1,6 @@
 {
   "name": "obsidian-catego",
-  "version": "0.2.7",
+  "version": "0.3.0",
   "description": "Catego — argument-mapping canvas plugin for Obsidian",
   "main": "main.js",
   "type": "module",
@@ -16,7 +16,9 @@
   "license": "MIT",
   "dependencies": {
     "@dagrejs/dagre": "3.0.0",
+    "area-polygon": "1.0.1",
     "dompurify": "3.4.10",
+    "interactive-shape-recognition": "1.0.1",
     "jspdf": "4.2.1",
     "katex": "0.16.45",
     "marked": "18.0.5",

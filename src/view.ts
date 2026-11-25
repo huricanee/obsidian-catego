@@ -59,7 +59,7 @@ export class CategoView extends TextFileView {
     this.root.render(
       createElement(Board, {
         key: this.reload,
-        initial: { nodes: this.board.nodes, arrows: this.board.arrows, regions: this.board.regions, strokes: this.board.strokes, notes: this.board.notes },
+        initial: { nodes: this.board.nodes, arrows: this.board.arrows, regions: this.board.regions, strokes: this.board.strokes, notes: this.board.notes, doc: this.board.doc || null },
         onPersist: (g: any) => this.persist(g),
         onOpenNote: (p: string) => this.openNote(p),
         onRenameNoteFile: (oldPath: string, newTitle: string) => this.renameNoteFile(oldPath, newTitle),
@@ -87,6 +87,7 @@ export class CategoView extends TextFileView {
     this.board.arrows = graph.arrows;
     this.board.regions = graph.regions;
     this.board.strokes = graph.strokes;
+    this.board.doc = graph.doc || null;
     if (graph.notes) this.board.notes = graph.notes;
     this.requestSave();
   }

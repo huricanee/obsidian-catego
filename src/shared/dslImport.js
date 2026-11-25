@@ -50,7 +50,7 @@ export function buildGraphFromDsl(text, genId, origin = { x: 0, y: 0 }) {
   });
 
   if (!parsed.nodes.length) {
-    return { nodes: [], arrows: [], regions, errors: parsed.errors, count: regions.length };
+    return { nodes: [], arrows: [], regions, errors: parsed.errors, count: regions.length, ...(parsed.doc !== undefined ? { doc: parsed.doc } : {}) };
   }
 
   // Nodes with explicit coordinates (figures, or a node with @x,y) are placed
@@ -177,5 +177,5 @@ export function buildGraphFromDsl(text, genId, origin = { x: 0, y: 0 }) {
     arrows.push(arrow);
   }
 
-  return { nodes, arrows, regions, errors: parsed.errors, count: nodes.length + regions.length };
+  return { nodes, arrows, regions, errors: parsed.errors, count: nodes.length + regions.length, ...(parsed.doc !== undefined ? { doc: parsed.doc } : {}) };
 }

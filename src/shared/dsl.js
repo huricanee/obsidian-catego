@@ -13,6 +13,9 @@
  *                                            operator's id — nesting = parentheses)
  *   REGION id = region(x1, y1, x2, y2 [, #color] [, fill] [, "name"])   (fill = tinted inside; default outline only)
  *   FIGURE id = shape(x, y, w, h [, #color])   shape = rect|square|circle|ellipse|triangle
+ *   PAGES  doc = pages(paper [, ruling] [, x, y])   board setup: a paged document instead of an
+ *          doc = pages(none)                        infinite canvas. paper = a4|a4l|letter|wide,
+ *                                                   ruling = blank|ruled|grid|dots, x,y = first sheet's corner
  *
  *   OP =  ->  forward   |  <-  reverse  |  <->  both  |  --  no arrows
  *         =>  implies (sugar)            |  <=>  equivalently (sugar)
@@ -119,6 +122,7 @@ export function parseDsl(text) {
   const edges = [];
   const regions = [];
   const errors = [];
+  let doc;                   // undefined = not mentioned; null = pages(none)
 
   const ensureNode = (id) => {
     if (!nodes.has(id)) nodes.set(id, { id, kind: null, text: id, status: null, color: null, w: null, h: null, x: null, y: null, shape: null, negated: false, probability: null, declared: false });
@@ -135,6 +139,14 @@ export function parseDsl(text) {
       const [, id, negRaw, fnRaw, argStr] = fm;
       const fn = fnRaw.toLowerCase();
       const args = splitArgs(argStr);
+
+      if (fn === 'pages') {
+        const words = args.filter((a) => !/^-?\d+(\.\d+)?$/.test(a)).map((a) => unquote(a).toLowerCase());
+        const nums = args.filter((a) => /^-?\d+(\.\d+)?$/.test(a)).map(Number);
+        if (words[0] === 'none' || words[0] === 'infinite') { doc = null; return; }
+        doc = { paper: words[0] || 'a4', bg: words[1] || 'ruled', x: nums[0] || 0, y: nums[1] || 0 };
+        return;
+      }
 
       if (fn === 'region') {
         if (args.length < 4) { errors.push(`line ${i + 1}: region needs at least x1,y1,x2,y2`); return; }
@@ -236,5 +248,5 @@ export function parseDsl(text) {
     if (!n.declared && (regionIds.has(id) || opIds.has(id))) nodes.delete(id);
   }
 
-  return { nodes: Array.from(nodes.values()), edges, regions, errors };
+  return { nodes: Array.from(nodes.values()), edges, regions, errors, ...(doc !== undefined ? { doc } : {}) };
 }

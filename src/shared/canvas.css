@@ -1832,3 +1832,150 @@
   z-index: 5;
   white-space: pre-wrap;
 }
+
+/* ============================================================
+   Paged document ("sheets") — see src/pages.js
+   ============================================================ */
+.canvas-root.doc-mode .canvas-grid { display: none; }
+.canvas-root.doc-mode { background: #050506; }
+.page-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+.doc-page {
+  position: absolute;
+  box-sizing: border-box;
+  background-color: #111114;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 3px;
+  box-shadow: 0 6px 30px rgba(0, 0, 0, 0.55);
+  --rule: rgba(255, 255, 255, 0.075);
+}
+/* 40px = two grid cells: a comfortable handwriting line. */
+.doc-page.bg-ruled {
+  background-image: linear-gradient(to bottom, transparent 39px, var(--rule) 39px);
+  background-size: 100% 40px;
+  background-position: 0 40px;
+}
+.doc-page.bg-grid {
+  background-image:
+    linear-gradient(to right, var(--rule) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--rule) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+.doc-page.bg-dots {
+  background-image: radial-gradient(circle at 0 0, rgba(255, 255, 255, 0.20) 1px, transparent 1.2px);
+  background-size: 20px 20px;
+}
+.doc-page-num {
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+  font: 500 11px/1 ui-sans-serif, system-ui, sans-serif;
+  color: rgba(255, 255, 255, 0.28);
+  user-select: none;
+}
+
+/* Page-setup popover (functions toolbar) */
+.page-menu {
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 8px);
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  width: 232px;
+  background: rgba(20, 22, 30, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 200;
+}
+.page-menu .props-label { display: block; margin-bottom: 5px; }
+.seg-row { display: flex; flex-wrap: wrap; gap: 4px; }
+.seg-btn {
+  flex: 1 1 auto;
+  padding: 6px 8px;
+  font: 600 11px/1.2 ui-sans-serif, system-ui, sans-serif;
+  color: #c9c9d4;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.seg-btn:hover { background: rgba(255, 255, 255, 0.06); }
+.seg-btn.active { background: rgba(207, 123, 240, 0.18); border-color: #cf7bf0; color: #fff; }
+.seg-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* Group selection: corner handle that scales the whole selection */
+.sel-resize-handle {
+  position: absolute;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: #0e0e10;
+  border: 2px solid #cf7bf0;
+  cursor: nwse-resize;
+  z-index: 260;
+  pointer-events: all;
+}
+
+/* ============================================================
+   Touch screens (iPad): bigger targets, no hotkey badges
+   ============================================================ */
+@media (pointer: coarse) {
+  .toolbar-btn { width: 42px; height: 42px; }
+  .hk-pill { display: none; }
+  .color-swatch { width: 28px; height: 28px; }
+  .seg-btn { padding: 10px 10px; font-size: 13px; }
+  .sel-resize-handle { transform: scale(2); }
+  .catego-root, .catego-root * { -webkit-tap-highlight-color: transparent; }
+  .catego-root { -webkit-user-select: none; user-select: none; }
+  .catego-root [contenteditable="true"], .catego-root input, .catego-root textarea { -webkit-user-select: text; user-select: text; }
+}
+
+/* ============================================================
+   Compact properties panel — one `name: value` line per property;
+   a line unfolds to show its choices.
+   ============================================================ */
+.props-panel.compact { width: 216px; gap: 2px; padding: 8px; transition: width 0.12s ease; }
+.props-panel.compact.has-open { width: 320px; }
+.props-panel.compact .props-title { padding: 2px 6px 6px; }
+.props-group.prop { gap: 0; }
+.prop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font: 500 12px/1.3 ui-sans-serif, system-ui, sans-serif;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.prop-row:hover { background: rgba(255, 255, 255, 0.06); }
+.props-group.prop.open > .prop-row { background: rgba(207, 123, 240, 0.12); }
+.prop-key { flex: 0 0 auto; opacity: 0.5; }
+.prop-key::after { content: ':'; }
+.prop-val {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-transform: lowercase;
+}
+.prop-caret { flex: 0 0 auto; opacity: 0.35; font-size: 9px; }
+.prop-dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, 0.25); }
+.prop-body { display: flex; flex-direction: column; gap: 5px; padding: 6px 2px 8px; }
+@media (pointer: coarse) {
+  .prop-row { padding: 9px 8px; font-size: 14px; }
+  .props-panel.compact { width: 240px; }
+}

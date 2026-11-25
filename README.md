@@ -6,7 +6,7 @@ board is not a picture of an argument but the argument itself, laid out so you
 can check it.
 
 Boards are ordinary files in your vault (`.catego`), like Excalidraw drawings.
-No account, no server. Desktop only.
+No account, no server. Desktop, plus iPad with touch and stylus (new — pressure-sensitive ink, finger gestures).
 
 ## What you can express
 
@@ -55,6 +55,7 @@ The essentials:
 | `Cmd` + `F` | centre the view on the selected node / arrow |
 | `.` + `WASD` | jump to the nearest **arrow** in that direction |
 | `Option` + `WASD` | resize |
+| `Cmd` + `C` / `X` / `V` | copy / cut / paste the selection (with its arrows and ink) |
 | `I` `J` `K` `L` | pull an arrow out of the selected node |
 | `Shift` + letter | set the node / arrow type |
 | `Shift` + `1`…`0` | color |

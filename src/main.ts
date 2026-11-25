@@ -1,5 +1,8 @@
 import { Plugin, TFile, TFolder, Notice } from 'obsidian';
 import { CategoView, VIEW_TYPE_CATEGO } from './view';
+import { emptyBoard, serializeBoard } from './format';
+// @ts-ignore — pure ESM geometry, shared with the web app
+import { makeDoc } from './shared/pages.js';
 
 /**
  * One `.catego` file = one board. No accounts, no registration, no board list —
@@ -40,6 +43,13 @@ export default class CategoPlugin extends Plugin {
       callback: () => this.newBoard(this.activeFolder()),
     });
 
+    // Create a notebook — a board made of ruled sheets instead of an infinite canvas.
+    this.addCommand({
+      id: 'new-notebook',
+      name: 'Create new notebook (sheets)',
+      callback: () => this.newBoard(this.activeFolder(), serializeBoard({ ...emptyBoard(), doc: makeDoc('a4', 'ruled') }), 'Notebook'),
+    });
+
     // Add the active file (note, PDF, image, …) as a node in the open board.
     this.addCommand({
       id: 'note-to-node',
@@ -61,6 +71,10 @@ export default class CategoPlugin extends Plugin {
         if (file instanceof TFolder) {
           menu.addItem((item) =>
             item.setTitle('New Catego board').setIcon('git-fork').onClick(() => this.newBoard(file.path)),
+          );
+          menu.addItem((item) =>
+            item.setTitle('New Catego notebook').setIcon('notebook').onClick(() =>
+              this.newBoard(file.path, serializeBoard({ ...emptyBoard(), doc: makeDoc('a4', 'ruled') }), 'Notebook')),
           );
         } else if (file instanceof TFile) {
           // Any file type can be added as a node (the node links to the file);
@@ -90,13 +104,13 @@ export default class CategoPlugin extends Plugin {
     return parent && parent !== '/' ? parent : '';
   }
 
-  private async newBoard(folder: string) {
+  private async newBoard(folder: string, content = '', base = 'Untitled') {
     const dir = folder ? `${folder}/` : '';
-    let path = `${dir}Untitled.catego`;
+    let path = `${dir}${base}.catego`;
     let i = 1;
-    while (this.app.vault.getAbstractFileByPath(path)) path = `${dir}Untitled ${i++}.catego`;
+    while (this.app.vault.getAbstractFileByPath(path)) path = `${dir}${base} ${i++}.catego`;
     try {
-      const file = await this.app.vault.create(path, '');
+      const file = await this.app.vault.create(path, content);
       await this.app.workspace.getLeaf(true).openFile(file);
     } catch (e: any) {
       new Notice(`Could not create board: ${e?.message ?? e}`);

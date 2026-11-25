@@ -1,3 +1,6 @@
-- `Cmd` + `WASD` now jumps to the nearest node **or arrow** in that direction (`.` + `WASD` still walks arrows only).
-- New: `Cmd` + `F` centres the view on the selected node, arrow or region.
-- Shortcut sheet (`?`) updated; resize rows corrected to `Option` + `WASD`.
+- **Notebook mode**: a board can be a document made of sheets (A4, Letter, 16:10; blank, ruled, grid or dots) instead of an infinite canvas — page-setup button in the right toolbar, or the new command "Create new notebook (sheets)". PDF export is one page per sheet, and exports now include ink.
+- **Stylus and touch** (the plugin is no longer desktop-only): pressure-sensitive ink; one finger pans, two fingers zoom; a two-finger tap switches eraser ⇄ last tool; a long press opens the pen options. Once a stylus has touched the board, fingers only navigate.
+- **Shapes**: draw a rough line, rectangle or ellipse and hold still at the end — it snaps to the clean shape. Anything else stays as drawn.
+- **Selection**: a corner handle scales a group (nodes and ink), `Cmd` + `C` / `X` / `V`, a Duplicate button, ink width / opacity / colour for the selection.
+- **Properties panel** is compact: one `name: value` line per property, unfolding on click.
+- Keyboard: `Cmd` + `WASD` walks nodes and arrows; `Cmd` + `F` centres the view on the selection.

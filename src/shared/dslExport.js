@@ -102,6 +102,8 @@ export function serializeToDsl(state = {}) {
   const figures = nodes.filter((n) => n.shape);
 
   const sections = [];
+  // Board setup: a paged document (omitted for the default infinite canvas).
+  if (state.doc) sections.push(`doc = pages(${state.doc.paper || 'a4'}, ${state.doc.bg || 'ruled'}, ${Math.round(state.doc.x || 0)}, ${Math.round(state.doc.y || 0)})`);
   if (plainNodes.length) sections.push(plainNodes.map(nodeLine).join('\n'));
   if (figures.length) sections.push(figures.map(nodeLine).join('\n'));
   if (regions.length) sections.push(regions.map(regionLine).join('\n'));

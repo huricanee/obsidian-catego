@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import Canvas, { NEW_NODE_W, NEW_NODE_H } from './Canvas.jsx';
 import { NODE_KINDS, NODE_KIND_ORDER, EDGE_KINDS, EDGE_KIND_ORDER, NODE_STATUSES, NODE_STATUS_ROWS, FONT_FAMILY_ORDER, FONT_FAMILY_LABEL, DEFAULT_FONT_SIZE } from './argTypes.js';
 
@@ -59,6 +59,14 @@ import { jsPDF } from 'jspdf';
 import { buildExportSvg, svgToCanvas } from './exportSvg.js';
 import { buildGraphFromDsl } from './dslImport.js';
 import { serializeToDsl } from './dslExport.js';
+import { PAPERS, PAGE_BGS, makeDoc, normalizeDoc, docLayout as computeDocLayout, clampViewport, fitPageViewport, pageIndexAt, contentBounds } from './pages.js';
+
+// A touch screen is present (iPad, touch laptop): pen options collapse while
+// writing, finger gestures are live.
+const TOUCH = typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0;
+// Copy / paste buffer. Module-level so it survives switching boards in the
+// same window; the system clipboard carries it across windows.
+let boardClipboard = null;
 
 /* ================================================================
    Mobile detection hook
@@ -127,6 +135,7 @@ function defaultState(zoom = 1) {
     arrows: {},
     strokes: [],
     regions: {},
+    doc: null, // paged-document setup (src/pages.js) — null = infinite board
     viewport: { panX: 0, panY: 0, zoom },
   };
 }
@@ -207,11 +216,20 @@ export default function Board({
       arrows: initial.arrows || {},
       regions: initial.regions || {},
       strokes: initial.strokes || [],
+      doc: normalizeDoc(initial.doc),
       viewport: initial.viewport || base.viewport,
     };
   };
 
   const [state, setState] = useState(initialState);
+  // Paged document: page rectangles + the area the view may roam (null = infinite).
+  const layout = useMemo(
+    () => computeDocLayout(state.doc, state),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.doc, state.nodes, state.regions, state.strokes, state.arrows],
+  );
+  const layoutRef = useRef(layout);
+  useEffect(() => { layoutRef.current = layout; }, [layout]);
   const [selectedId, setSelectedId] = useState(null);
   const [selectedType, setSelectedType] = useState(null); // 'node' | 'arrow' | null
   const [editingNodeId, setEditingNodeId] = useState(null); // node currently in text edit (lifted from Canvas)
@@ -239,6 +257,31 @@ export default function Board({
   // Unified tool mode: 'select' | 'move' | 'draw' | 'eraser'
   // Mobile defaults to 'move' (pan + drag nodes), desktop to 'select'
   const [toolMode, setToolMode] = useState(isMobile ? 'move' : 'select');
+  // Pen options panel (colour / width / opacity). Always there with a mouse;
+  // on a touch screen it opens on demand (tap the pen button again, or
+  // long-press the board with a finger) and closes once you write.
+  const [penPanelOpen, setPenPanelOpen] = useState(!TOUCH);
+  // Properties panel: every property is one `name: value` line; the one
+  // named here is unfolded to show its choices.
+  const [openProp, setOpenProp] = useState(null);
+  // Page-setup popover (infinite board ⇄ sheets).
+  const [pageMenuOpen, setPageMenuOpen] = useState(false);
+  // Finger gestures (see the touch adapter in Canvas.jsx).
+  const toolModeRef = useRef(toolMode);
+  const lastToolRef = useRef('draw'); // last tool that wasn't the eraser
+  useEffect(() => {
+    toolModeRef.current = toolMode;
+    if (toolMode !== 'eraser') lastToolRef.current = toolMode;
+  }, [toolMode]);
+  // Two-finger tap: eraser ⇄ the tool used before it.
+  const onTwoFingerTap = useCallback(() => {
+    setToolMode(toolModeRef.current === 'eraser' ? (lastToolRef.current || 'draw') : 'eraser');
+  }, []);
+  // Long press: pen options (switching to the pen if needed).
+  const onFingerLongPress = useCallback(() => {
+    if (toolModeRef.current === 'draw') setPenPanelOpen((v) => !v);
+    else { setToolMode('draw'); setPenPanelOpen(true); }
+  }, []);
   const [drawColor, setDrawColor] = useState('#cf7bf0');
   const [drawWidth, setDrawWidth] = useState(4);
   const [drawOpacity, setDrawOpacity] = useState(100); // 1–100
@@ -299,6 +342,19 @@ export default function Board({
     return () => window.removeEventListener('mousedown', onDocDown);
   }, [printMenuOpen]);
 
+  useEffect(() => {
+    if (!pageMenuOpen) return;
+    function onDocDown(e) {
+      const menu = document.getElementById('page-menu');
+      const btn = document.getElementById('page-btn');
+      if ((menu && menu.contains(e.target)) || (btn && btn.contains(e.target))) return;
+      setPageMenuOpen(false);
+    }
+    window.addEventListener('mousedown', onDocDown);
+    window.addEventListener('touchstart', onDocDown);
+    return () => { window.removeEventListener('mousedown', onDocDown); window.removeEventListener('touchstart', onDocDown); };
+  }, [pageMenuOpen]);
+
   const exportCanvas = useCallback(async (format, { whole = false } = {}) => {
     setPrintBusy(true);
     setPrintMenuOpen(false);
@@ -309,6 +365,20 @@ export default function Board({
       // whole:true renders the ENTIRE board at world scale — every node at its
       // real size, so text stays crisp and nothing is hidden no matter how far
       // out the user is zoomed. Otherwise we capture just the current viewport.
+      // A paged document prints as a real multi-page PDF: one sheet per page
+      // (the trailing blank sheet is left out).
+      if (format === 'pdf' && layout) {
+        const sheets = layout.pages.slice(0, Math.max(1, layout.count - 1));
+        const orientation = layout.w >= layout.h ? 'landscape' : 'portrait';
+        const pdf = new jsPDF({ orientation, unit: 'px', format: [layout.w, layout.h], compress: true });
+        for (let i = 0; i < sheets.length; i++) {
+          const sheetCanvas = await svgToCanvas(buildExportSvg(state, { rect: sheets[i], paper: layout.bg }), 2);
+          if (i > 0) pdf.addPage([layout.w, layout.h], orientation);
+          pdf.addImage(sheetCanvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, layout.w, layout.h);
+        }
+        pdf.save(`catego-${ts}.pdf`);
+        return;
+      }
       const svg = buildExportSvg(state, { viewportOnly: !whole });
       const canvas = await svgToCanvas(svg, pixelRatio);
       const suffix = whole ? '-board' : '';
@@ -351,7 +421,7 @@ export default function Board({
     } finally {
       setPrintBusy(false);
     }
-  }, [state]);
+  }, [state, layout]);
 
   const toggleSourceMode = useCallback(() => {
     setSourceMode(prev => {
@@ -363,7 +433,6 @@ export default function Board({
 
   // Draw options panel (double-tap draw button)
   const [showDrawOptions, setShowDrawOptions] = useState(false);
-  const lastDrawTapRef = useRef(0);
 
   // Eraser state
   const [eraserMode, setEraserMode] = useState('object'); // 'object' | 'pixel'
@@ -440,6 +509,8 @@ export default function Board({
         }
         case 'state:undo':
           return { ...prev, nodes: delta.state.nodes, arrows: delta.state.arrows, strokes: delta.state.strokes, regions: delta.state.regions || {} };
+        case 'doc:update':
+          return { ...prev, doc: normalizeDoc(delta.doc) };
         case 'erase:objects': {
           const nIds = new Set(delta.nodeIds || []);
           const aIds = new Set(delta.arrowIds || []);
@@ -470,6 +541,8 @@ export default function Board({
       arrows: serverState.arrows || {},
       strokes,
       regions: serverState.regions || {},
+      // Older servers don't know about `doc` — keep the local one then.
+      ...(serverState.doc !== undefined ? { doc: normalizeDoc(serverState.doc) } : {}),
     }));
   }, []);
 
@@ -494,6 +567,7 @@ export default function Board({
         arrows: state.arrows,
         regions: state.regions || {},
         strokes: state.strokes || [],
+        doc: state.doc || null,
         notes,
         viewport: state.viewport,
       });
@@ -645,8 +719,57 @@ export default function Board({
      State updaters
      ================================================================ */
   const onUpdateViewport = useCallback((vp) => {
-    setState((prev) => ({ ...prev, viewport: vp }));
+    // Document mode: the view can't leave the sheets.
+    const lay = layoutRef.current, el = rootRef.current;
+    const next = lay && el ? clampViewport(vp, lay, el.clientWidth, el.clientHeight) : vp;
+    setState((prev) => ({ ...prev, viewport: next }));
   }, []);
+
+  // Show page `index` (default: the one in view) at full width.
+  const fitPage = useCallback((index = null, lay = layoutRef.current) => {
+    const el = rootRef.current;
+    if (!lay || !el) return;
+    setState((prev) => {
+      const i = index != null ? index : pageIndexAt(lay, (el.clientHeight / 3 - prev.viewport.panY) / prev.viewport.zoom);
+      return { ...prev, viewport: fitPageViewport(lay, el.clientWidth, el.clientHeight, i) };
+    });
+  }, []);
+
+  // Board setup: infinite canvas (null) or a paged document.
+  const changeDoc = useCallback((patch) => {
+    const st = stateRef.current;
+    const cur = st.doc;
+    let next;
+    if (patch === null) next = null;
+    else if (!cur) {
+      // Converting an existing board: put the first sheet's corner just above
+      // and left of what is already there.
+      const cb = contentBounds(st);
+      const down = (v) => Math.floor(v / 20) * 20;
+      next = makeDoc(patch.paper || 'a4', patch.bg || 'ruled', cb ? { x: down(cb.x0 - 40), y: down(cb.y0 - 40) } : null);
+    } else {
+      next = normalizeDoc({ ...cur, ...patch, ...(patch.paper && PAPERS[patch.paper] ? { w: PAPERS[patch.paper].w, h: PAPERS[patch.paper].h } : {}) });
+    }
+    setState((prev) => ({ ...prev, doc: next }));
+    send({ type: 'doc:update', doc: next });
+    if (next && (!cur || patch.paper)) fitPage(cur ? null : 0, computeDocLayout(next, st));
+  }, [send, fitPage]);
+
+  // A document opened without a saved view starts on its first page.
+  useEffect(() => {
+    if (stateRef.current.doc && !(initial && initial.viewport)) fitPage(0, computeDocLayout(stateRef.current.doc, stateRef.current));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Pages are derived from the content: when the document shrinks, pull the
+  // view back onto it.
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!layout || !el) return;
+    setState((prev) => {
+      const c = clampViewport(prev.viewport, layout, el.clientWidth, el.clientHeight);
+      return c === prev.viewport ? prev : { ...prev, viewport: c };
+    });
+  }, [layout]);
 
   const onAddNode = useCallback((x, y) => {
     const id = genId();
@@ -861,6 +984,7 @@ export default function Board({
     const strokeWithId = { ...stroke, id: stroke.id || genId('s') };
     // Drop transient pen-gesture fields (hold-to-straighten bookkeeping).
     delete strokeWithId.t0; delete strokeWithId.straight;
+    if (!strokeWithId.shape) delete strokeWithId.shape;
     setStateWithHistory((prev) => {
       // Guard against double-add (e.g. StrictMode double-invoke or a stray
       // second mouseup) which would create duplicate React keys.
@@ -868,6 +992,7 @@ export default function Board({
       return { ...prev, strokes: [...(prev.strokes || []), strokeWithId] };
     });
     send({ type: 'stroke:add', stroke: strokeWithId });
+    if (TOUCH) setPenPanelOpen(false); // writing: get the options out of the way
   }, [setStateWithHistory, send]);
 
   // Region callbacks
@@ -984,8 +1109,16 @@ export default function Board({
         send({ type: 'arrow:update', id, updates: { color } });
       }
     }
+    for (const id of selection.strokeIds) onUpdateStroke(id, { color });
     setState((prev) => { pushHistorySnapshot(prev); return prev; });
-  }, [bulkSelected, onUpdateNode, onUpdateRegion, send, pushHistorySnapshot]);
+  }, [bulkSelected, onUpdateNode, onUpdateRegion, onUpdateStroke, selection, send, pushHistorySnapshot]);
+
+  // Ink properties (width / opacity) over the selected strokes. `commit`
+  // pushes one undo step — sliders call it on release.
+  const bulkSetStroke = useCallback((updates, commit = true) => {
+    for (const id of selection.strokeIds) onUpdateStroke(id, updates);
+    if (commit) setState((prev) => { pushHistorySnapshot(prev); return prev; });
+  }, [selection, onUpdateStroke, pushHistorySnapshot]);
 
   const bulkSetKind = useCallback((kind) => {
     for (const { id, type } of bulkSelected()) {
@@ -1115,7 +1248,7 @@ export default function Board({
       // Move selected strokes
       const newStrokes = (prev.strokes || []).map(s => {
         if (selection.strokeIds.has(s.id)) {
-          const points = s.points.map(p => ({ x: p.x + dx, y: p.y + dy }));
+          const points = s.points.map(p => ({ ...p, x: p.x + dx, y: p.y + dy }));
           send({ type: 'stroke:update', id: s.id, updates: { points } });
           return { ...s, points };
         }
@@ -1131,6 +1264,134 @@ export default function Board({
       return prev;
     });
   }, [pushHistorySnapshot]);
+
+  /* ================================================================
+     Copy / cut / paste / duplicate — nodes, regions, ink, and every arrow
+     whose ends are all inside the copied set.
+     ================================================================ */
+  const pasteCountRef = useRef(0);
+  const effectiveSelection = useCallback(() => {
+    const sel = {
+      nodeIds: new Set(selection.nodeIds), arrowIds: new Set(selection.arrowIds),
+      strokeIds: new Set(selection.strokeIds), regionIds: new Set(selection.regionIds || []),
+    };
+    if (selectedId && SEL_KEY[selectedType]) sel[SEL_KEY[selectedType]].add(selectedId);
+    return sel;
+  }, [selection, selectedId, selectedType]);
+
+  const collectClip = useCallback(() => {
+    const st = stateRef.current;
+    const sel = effectiveSelection();
+    const cNodes = [...sel.nodeIds].map((id) => st.nodes[id]).filter(Boolean);
+    const cRegions = [...sel.regionIds].map((id) => (st.regions || {})[id]).filter(Boolean);
+    const cStrokes = (st.strokes || []).filter((x) => sel.strokeIds.has(x.id));
+    const nodeSet = new Set(cNodes.map((n) => n.id));
+    const regionSet = new Set(cRegions.map((r) => r.id));
+    const arrowSet = new Set();
+    const endsInside = (a) => {
+      let any = false;
+      for (const [id, set] of [[a.fromNodeId, nodeSet], [a.toNodeId, nodeSet], [a.fromRegionId, regionSet], [a.toRegionId, regionSet], [a.fromPillArrowId, arrowSet], [a.toPillArrowId, arrowSet]]) {
+        if (!id) continue;
+        any = true;
+        if (!set.has(id)) return false;
+      }
+      for (const part of a.participants || []) if (part.nodeId && !nodeSet.has(part.nodeId)) return false;
+      return any || sel.arrowIds.has(a.id); // free-floating arrows only when picked
+    };
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const a of Object.values(st.arrows)) {
+        if (!arrowSet.has(a.id) && endsInside(a)) { arrowSet.add(a.id); grew = true; }
+      }
+    }
+    const cArrows = [...arrowSet].map((id) => st.arrows[id]);
+    if (!cNodes.length && !cRegions.length && !cStrokes.length && !cArrows.length) return null;
+    return JSON.parse(JSON.stringify({ catego: 1, nodes: cNodes, regions: cRegions, strokes: cStrokes, arrows: cArrows }));
+  }, [effectiveSelection]);
+
+  const copySelection = useCallback(() => {
+    const clip = collectClip();
+    if (!clip) return false;
+    boardClipboard = clip;
+    pasteCountRef.current = 0;
+    try { navigator.clipboard?.writeText(JSON.stringify(clip))?.catch?.(() => {}); } catch { /* clipboard unavailable */ }
+    return true;
+  }, [collectClip]);
+
+  const pasteClip = useCallback((clip) => {
+    if (!clip || clip.catego !== 1) return false;
+    const cNodes = clip.nodes || [], cRegions = clip.regions || [], cStrokes = clip.strokes || [], cArrows = clip.arrows || [];
+    const cb = contentBounds({ nodes: cNodes, regions: cRegions, strokes: cStrokes, arrows: cArrows });
+    pasteCountRef.current += 1;
+    let dx = 40 * pasteCountRef.current, dy = dx;
+    // The original isn't on screen (other board, scrolled away) → drop the
+    // copy in the middle of the view instead of next to it.
+    const el = rootRef.current;
+    if (cb && el) {
+      const m = (document.querySelector('.canvas-transform')?.style.transform || '').match(/translate\(([^,]+)px,\s*([^)]+)px\)\s*scale\(([^)]+)\)/);
+      const vp = m ? { panX: parseFloat(m[1]), panY: parseFloat(m[2]), zoom: parseFloat(m[3]) } : stateRef.current.viewport;
+      const vx0 = -vp.panX / vp.zoom, vy0 = -vp.panY / vp.zoom;
+      const vx1 = vx0 + el.clientWidth / vp.zoom, vy1 = vy0 + el.clientHeight / vp.zoom;
+      const onScreen = cb.x1 + dx > vx0 && cb.x0 + dx < vx1 && cb.y1 + dy > vy0 && cb.y0 + dy < vy1;
+      if (!onScreen) {
+        const snap20 = (v) => Math.round(v / 20) * 20;
+        dx = snap20((vx0 + vx1) / 2 - (cb.x0 + cb.x1) / 2);
+        dy = snap20((vy0 + vy1) / 2 - (cb.y0 + cb.y1) / 2);
+      }
+    }
+    const idMap = {};
+    const newNodes = cNodes.map((n) => { const id = genId(); idMap[n.id] = id; return { ...n, id, x: n.x + dx, y: n.y + dy }; });
+    const newRegions = cRegions.map((r) => { const id = genId('r'); idMap[r.id] = id; return { ...r, id, x: r.x + dx, y: r.y + dy }; });
+    const newStrokes = cStrokes.map((x) => ({ ...x, id: genId('s'), points: (x.points || []).map((pt) => ({ ...pt, x: pt.x + dx, y: pt.y + dy })) }));
+    for (const a of cArrows) idMap[a.id] = genId('a');
+    const mapId = (id) => (id ? (idMap[id] || null) : id);
+    const movePt = (pt) => (pt ? { ...pt, x: pt.x + dx, y: pt.y + dy } : pt);
+    const newArrows = cArrows.map((a) => ({
+      ...a, id: idMap[a.id],
+      fromNodeId: mapId(a.fromNodeId), toNodeId: mapId(a.toNodeId),
+      fromRegionId: mapId(a.fromRegionId), toRegionId: mapId(a.toRegionId),
+      fromPillArrowId: mapId(a.fromPillArrowId), toPillArrowId: mapId(a.toPillArrowId),
+      fromPoint: movePt(a.fromPoint), toPoint: movePt(a.toPoint),
+      ...(a.participants ? { participants: a.participants.map((part) => ({ ...part, nodeId: mapId(part.nodeId) })) } : {}),
+    }));
+    setStateWithHistory((prev) => ({
+      ...prev,
+      nodes: { ...prev.nodes, ...Object.fromEntries(newNodes.map((n) => [n.id, n])) },
+      regions: { ...(prev.regions || {}), ...Object.fromEntries(newRegions.map((r) => [r.id, r])) },
+      arrows: { ...prev.arrows, ...Object.fromEntries(newArrows.map((a) => [a.id, a])) },
+      strokes: [...(prev.strokes || []), ...newStrokes],
+    }));
+    for (const n of newNodes) send({ type: 'node:add', node: n });
+    for (const r of newRegions) send({ type: 'region:add', region: r });
+    for (const a of newArrows) send({ type: 'arrow:add', arrow: a });
+    for (const x of newStrokes) send({ type: 'stroke:add', stroke: x });
+    // The copy becomes the selection, ready to be moved.
+    setToolMode('select');
+    setSelectedId(null);
+    setSelectedType(null);
+    setSelection({
+      nodeIds: new Set(newNodes.map((n) => n.id)), arrowIds: new Set(newArrows.map((a) => a.id)),
+      strokeIds: new Set(newStrokes.map((x) => x.id)), regionIds: new Set(newRegions.map((r) => r.id)),
+    });
+    return true;
+  }, [setStateWithHistory, send]);
+
+  const pasteFromClipboard = useCallback(() => {
+    if (boardClipboard) { pasteClip(boardClipboard); return; }
+    // Nothing copied in this window — maybe another window / tab did.
+    try {
+      navigator.clipboard?.readText?.().then((text) => {
+        try { const clip = JSON.parse(text); if (clip && clip.catego === 1) { boardClipboard = clip; pasteClip(clip); } } catch { /* not a board */ }
+      }).catch(() => {});
+    } catch { /* clipboard unavailable */ }
+  }, [pasteClip]);
+
+  const duplicateSelection = useCallback(() => {
+    const clip = collectClip();
+    if (!clip) return;
+    pasteCountRef.current = 0;
+    pasteClip(clip);
+  }, [collectClip, pasteClip]);
 
   /* ================================================================
      Vim-mode: Tab toggle + WASD nudge
@@ -2243,6 +2504,21 @@ export default function Board({
       const active = document.activeElement;
       if (active && active.contentEditable === 'true') return;
 
+      // Copy / cut / paste objects (⌘C ⌘X ⌘V).
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.code === 'KeyC' || e.code === 'KeyX' || e.code === 'KeyV')) {
+        if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+        if (e.code === 'KeyV') { e.preventDefault(); pasteFromClipboard(); return; }
+        if (!copySelection()) return;
+        e.preventDefault();
+        if (e.code === 'KeyX') {
+          if (selection.nodeIds.size > 0 || selection.arrowIds.size > 0 || selection.strokeIds.size > 0) onDeleteSelection();
+          else if (selectedId && selectedType === 'node') onDeleteNode(selectedId);
+          else if (selectedId && selectedType === 'arrow') onDeleteArrow(selectedId);
+          else if (selectedId && selectedType === 'region') { onDeleteRegion(selectedId); setSelectedId(null); setSelectedType(null); }
+        }
+        return;
+      }
+
       // Undo: Ctrl+Z / Cmd+Z (without shift)
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
@@ -2296,20 +2572,14 @@ export default function Board({
     // delete and region delete fire inside Obsidian.
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [selectedId, selectedType, onDeleteNode, onDeleteArrow, selection, onDeleteSelection, undo, redo, toolMode]);
+  }, [selectedId, selectedType, onDeleteNode, onDeleteArrow, onDeleteRegion, selection, onDeleteSelection, undo, redo, toolMode, copySelection, pasteFromClipboard]);
 
   /* ================================================================
      Draw button double-tap handler
      ================================================================ */
   const handleDrawTap = useCallback(() => {
-    const now = Date.now();
-    if (toolMode === 'draw' && now - lastDrawTapRef.current < 300) {
-      setShowDrawOptions(prev => !prev);
-    } else {
-      setToolMode('draw');
-      if (toolMode !== 'draw') setShowDrawOptions(false);
-    }
-    lastDrawTapRef.current = now;
+    if (toolMode === 'draw') setPenPanelOpen((v) => !v);
+    else setToolMode('draw');
   }, [toolMode]);
 
   /* ================================================================
@@ -2501,6 +2771,7 @@ export default function Board({
   }, [viewport, onUpdateViewport]);
 
   const handleFitView = useCallback(() => {
+    if (layoutRef.current) { fitPage(); return; } // document: current page, full width
     const nodeArr = Object.values(nodes);
     if (nodeArr.length === 0) {
       onUpdateViewport({ panX: 0, panY: 0, zoom: defaultZoom });
@@ -2523,13 +2794,13 @@ export default function Board({
     const panX = (window.innerWidth - contentW * zoom) / 2 - (minX - padding) * zoom;
     const panY = (window.innerHeight - contentH * zoom) / 2 - (minY - padding) * zoom;
     onUpdateViewport({ panX, panY, zoom });
-  }, [nodes, onUpdateViewport]);
+  }, [nodes, onUpdateViewport, fitPage]);
 
   // Board → DSL on the clipboard (the whole board, or the selection if any).
   const copyDsl = useCallback(() => {
     const st = stateRef.current;
     const selIds = selection.nodeIds.size ? selection.nodeIds : (selectedType === 'node' && selectedId ? new Set([selectedId]) : null);
-    let sub = { nodes: st.nodes, arrows: st.arrows, regions: st.regions || {} };
+    let sub = { nodes: st.nodes, arrows: st.arrows, regions: st.regions || {}, doc: st.doc };
     if (selIds) {
       const nodes = Object.fromEntries(Object.entries(st.nodes).filter(([id]) => selIds.has(id)));
       const keep = (a) => (!a.fromNodeId || nodes[a.fromNodeId]) && (!a.toNodeId || nodes[a.toNodeId]) && !a.fromRegionId && !a.toRegionId;
@@ -2560,6 +2831,9 @@ export default function Board({
     }
 
     const built = buildGraphFromDsl(text, genId, origin);
+    // `doc = pages(...)` — board setup carried by the text.
+    if (built.doc !== undefined) changeDoc(built.doc || null);
+    if (built.count === 0 && built.doc !== undefined) return { count: 0, errors: built.errors };
     if (built.count === 0) return { count: 0, errors: built.errors.length ? built.errors : ['Nothing to import.'] };
 
     const addNodes = {};
@@ -2582,7 +2856,7 @@ export default function Board({
     // Frame the freshly added graph.
     setTimeout(() => handleFitView(), 0);
     return { count: built.count, errors: built.errors };
-  }, [nodes, getActualViewport, setStateWithHistory, send, handleFitView]);
+  }, [nodes, getActualViewport, setStateWithHistory, send, handleFitView, changeDoc]);
 
   /* ================================================================
      Tool shortcuts: digits 1–8 pick a tool; `?` toggles the cheat-sheet.
@@ -2767,7 +3041,7 @@ export default function Board({
         <button
           className={`toolbar-btn${toolMode === 'draw' ? ' tool-active' : ''}`}
           onClick={handleDrawTap}
-          title="Draw (freehand, double-tap for options)"
+          title="Draw (freehand) — press again to show / hide pen options"
         >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <path d="M2.5 13.5s1-2 3-4 4-3.5 5.5-5S13 2.5 13 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -2824,7 +3098,7 @@ export default function Board({
       </div>
 
       {/* Pen toolbar — shown while drawing: color, width (1–10), opacity (1–100) */}
-      {toolMode === 'draw' && (
+      {toolMode === 'draw' && penPanelOpen && (
         <div className="pen-toolbar">
           <div className="pen-group">
             <span className="props-label">Color</span>
@@ -2975,6 +3249,69 @@ export default function Board({
           </svg>
         </button>
 
+        {/* Page setup — infinite board, or a document made of sheets. */}
+        <div style={{ position: 'relative' }}>
+          <button
+            id="page-btn"
+            className={`toolbar-btn${pageMenuOpen || state.doc ? ' tool-active' : ''}`}
+            onClick={() => setPageMenuOpen((v) => !v)}
+            title="Page setup — infinite board or sheets"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M4 1.8h5.2L12.5 5v9.2H4z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+              <path d="M9 1.8V5h3.5M6 8.2h4.5M6 10.6h4.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          {pageMenuOpen && (
+            <div id="page-menu" className="page-menu">
+              <div>
+                <span className="props-label">Board</span>
+                <div className="seg-row">
+                  <button className={`seg-btn${!state.doc ? ' active' : ''}`} onClick={() => changeDoc(null)}>Infinite</button>
+                  <button className={`seg-btn${state.doc ? ' active' : ''}`} onClick={() => { if (!state.doc) changeDoc({}); }}>Sheets</button>
+                </div>
+              </div>
+              {state.doc && (
+                <>
+                  <div>
+                    <span className="props-label">Paper</span>
+                    <div className="seg-row">
+                      {Object.entries(PAPERS).map(([key, def]) => (
+                        <button key={key} className={`seg-btn${state.doc.paper === key ? ' active' : ''}`} onClick={() => changeDoc({ paper: key })}>{def.label}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <span className="props-label">Ruling</span>
+                    <div className="seg-row">
+                      {PAGE_BGS.map((bg) => (
+                        <button key={bg} className={`seg-btn${state.doc.bg === bg ? ' active' : ''}`} onClick={() => changeDoc({ bg })}>{bg[0].toUpperCase() + bg.slice(1)}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <span className="props-label" style={{ opacity: 0.7, textTransform: 'none', letterSpacing: 0 }}>
+                    {layout ? `${layout.count} sheet${layout.count === 1 ? '' : 's'} — a new one appears as you fill the last. PDF export is one page per sheet.` : ''}
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Duplicate the selection (⌘C then ⌘V does the same) */}
+        <button
+          className="toolbar-btn"
+          onClick={duplicateSelection}
+          disabled={!selectedId && selection.nodeIds.size + selection.strokeIds.size + selection.arrowIds.size + (selection.regionIds ? selection.regionIds.size : 0) === 0}
+          title="Duplicate selection (⌘C, ⌘V)"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <rect x="2.5" y="2.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M5.5 13.5h6.5a1.5 1.5 0 0 0 1.5-1.5V5.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            <path d="M6.5 5v3M5 6.5h3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+          </svg>
+        </button>
+
         <div className="toolbar-divider" />
         {/* Text ⇄ board: the DSL is the board as text (and what an AI reads/writes). */}
         <button className="toolbar-btn" onClick={() => setDslOpen(true)} title="Import from text (DSL) — ⌘⇧U">
@@ -3015,13 +3352,40 @@ export default function Board({
       {/* Bulk properties panel — shown when 2+ objects are multi-selected */}
       {(() => {
         const items = bulkSelected();
-        if (items.length < 2 || !propsOpen) return null;
+        const inkIds = selection.strokeIds;
+        if ((items.length < 2 && inkIds.size === 0) || !propsOpen) return null;
         const nodeCount = items.filter((i) => i.type === 'node').length;
+        const firstInk = inkIds.size ? strokes.find((st) => inkIds.has(st.id)) : null;
         return (
-          <div className="props-panel">
-            <div className="props-title">{items.length} selected</div>
+          <div className={`props-panel compact${openProp ? ' has-open' : ''}`}>
+            <div className="props-title">{items.length + inkIds.size} selected</div>
             <div className="props-group">
-              <span className="props-label">Color</span>
+              <div className="seg-row">
+                <button className="seg-btn" onClick={duplicateSelection} title="Duplicate">Duplicate</button>
+                <button className="seg-btn" onClick={copySelection} title="Copy (⌘C)">Copy</button>
+                <button className="seg-btn" onClick={onDeleteSelection} title="Delete">Delete</button>
+              </div>
+              <span className="props-label" style={{ opacity: 0.7, textTransform: 'none', letterSpacing: 0, marginTop: 6 }}>
+                Drag the round handle at the corner of the selection to resize it.
+              </span>
+            </div>
+            {firstInk && (
+              <><PropRow id="inkw" label="ink width" value={Math.round((firstInk.width || 2) * 10) / 10} open={openProp} setOpen={setOpenProp}>
+                <input
+                  type="range" min="1" max="10" step="1" value={Math.min(10, Math.max(1, Math.round(firstInk.width || 2)))}
+                  onChange={(e) => bulkSetStroke({ width: Number(e.target.value) }, false)}
+                  onMouseUp={() => bulkSetStroke({}, true)} onTouchEnd={() => bulkSetStroke({}, true)}
+                />
+</PropRow>
+<PropRow id="inko" label="ink opacity" value={`${firstInk.opacity == null ? 100 : firstInk.opacity}%`} open={openProp} setOpen={setOpenProp}>
+                <input
+                  type="range" min="1" max="100" step="1" value={firstInk.opacity == null ? 100 : firstInk.opacity}
+                  onChange={(e) => bulkSetStroke({ opacity: Number(e.target.value) }, false)}
+                  onMouseUp={() => bulkSetStroke({}, true)} onTouchEnd={() => bulkSetStroke({}, true)}
+                />
+              </PropRow></>
+            )}
+            <PropRow id="bcolor" label="color" value={'set for all…'} open={openProp} setOpen={setOpenProp}>
               <div className="color-palette">
                 {PALETTE.map((c) => (
                   <button
@@ -3033,10 +3397,9 @@ export default function Board({
                   />
                 ))}
               </div>
-            </div>
+            </PropRow>
             {nodeCount > 0 && (
-              <div className="props-group">
-                <span className="props-label">Node type · {nodeCount}</span>
+              <PropRow id="btype" label="type" value={`${nodeCount} node${nodeCount === 1 ? '' : 's'}…`} open={openProp} setOpen={setOpenProp}>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
                   <button className="logic-chip" onClick={() => bulkSetKind(null)} title="Clear type">none</button>
                   {Object.keys(NODE_KINDS).map((k) => {
@@ -3052,7 +3415,7 @@ export default function Board({
                     );
                   })}
                 </div>
-              </div>
+              </PropRow>
             )}
           </div>
         );
@@ -3111,12 +3474,11 @@ export default function Board({
           );
         };
         return (
-          <div className="props-panel">
+          <div className={`props-panel compact${openProp ? ' has-open' : ''}`}>
             <div className="props-title">{selectedType}</div>
 
             {/* Color (text color for text nodes) */}
-            <div className="props-group">
-              <span className="props-label">{isTextNode ? 'Text color' : 'Color'}</span>
+            <PropRow id="color" label="color" value={<ColorVal c={curColor} locked={colorLocked} />} open={openProp} setOpen={setOpenProp}>
               <div className={`color-palette${colorLocked ? ' disabled' : ''}`}>
                 {PALETTE.map((c) => (
                   <button
@@ -3129,12 +3491,11 @@ export default function Board({
                   >{COLOR_HK[c] && <span className="hk-pill hk-swatch">{COLOR_HK[c]}</span>}</button>
                 ))}
               </div>
-            </div>
+            </PropRow>
 
             {/* Type (logic kind) — not for text nodes (they're plain labels). */}
             {!isTextNode && !isRegion && (
-              <div className="props-group">
-                <span className="props-label">Type</span>
+              <PropRow id="type" label="type" value={currentKind ? ((isArrow ? EDGE_KINDS[currentKind] : NODE_KINDS[currentKind]) || {}).label || currentKind : 'none'} open={openProp} setOpen={setOpenProp}>
                 {isNode && (
                   <>
                     <button
@@ -3164,13 +3525,12 @@ export default function Board({
                     ))}
                   </>
                 )}
-              </div>
+              </PropRow>
             )}
 
             {/* Node: toggles (rounded / NOT / probability) */}
             {isNode && !isTextNode && (
-              <div className="props-group">
-                <span className="props-label">Node</span>
+              <PropRow id="node" label="node" value={[sel.negated && 'not', sel.probability != null && `prb ${sel.probability}%`].filter(Boolean).join(', ') || 'none'} open={openProp} setOpen={setOpenProp}>
                 <div className="props-row">
                   <button
                     className={`props-btn${sel.negated ? ' active' : ''}`}
@@ -3183,13 +3543,12 @@ export default function Board({
                     title="Toggle probability (0–100%)"
                   >% Prob</button>
                 </div>
-              </div>
+              </PropRow>
             )}
 
             {/* Status (epistemic state) — claim nodes only. */}
             {isNode && !isTextNode && (
-              <div className="props-group">
-                <span className="props-label">Status</span>
+              <PropRow id="status" label="status" value={sel.status ? NODE_STATUSES[sel.status].label : 'none'} open={openProp} setOpen={setOpenProp}>
                 <button
                   className={`logic-chip none full${!sel.status ? ' active' : ''}`}
                   onClick={() => onUpdateNode(selectedId, { status: null })}
@@ -3212,13 +3571,12 @@ export default function Board({
                     })}
                   </div>
                 ))}
-              </div>
+              </PropRow>
             )}
 
             {/* Region: lock */}
             {isRegion && (
-              <div className="props-group">
-                <span className="props-label">Region</span>
+              <PropRow id="region" label="region" value={sel.fill ? 'filled' : 'outline'} open={openProp} setOpen={setOpenProp}>
                 <div className="props-row">
                   <button
                     className={`props-btn${sel.fill ? ' active' : ''}`}
@@ -3227,13 +3585,12 @@ export default function Board({
                   >{sel.fill ? '▣ Filled' : '▢ Fill'}</button>
                 </div>
                 {renderRegionExtras && renderRegionExtras(selectedId)}
-              </div>
+              </PropRow>
             )}
 
             {/* Node: alignment */}
             {isNode && !isFigure && (
-              <div className="props-group">
-                <span className="props-label">Text align</span>
+              <><PropRow id="align" label="align" value={sel.align || 'left'} open={openProp} setOpen={setOpenProp}>
                 <div className="props-row">
                   {['left', 'center', 'right'].map(align => (
                     <button
@@ -3250,7 +3607,8 @@ export default function Board({
                     </button>
                   ))}
                 </div>
-                <span className="props-label">Vertical align</span>
+</PropRow>
+<PropRow id="valign" label="v-align" value={sel.valign || 'top'} open={openProp} setOpen={setOpenProp}>
                 <div className="props-row">
                   {['top', 'center', 'bottom'].map(valign => (
                     <button
@@ -3267,7 +3625,7 @@ export default function Board({
                     </button>
                   ))}
                 </div>
-              </div>
+              </PropRow></>
             )}
 
             {/* Node: Markdown formatting toolbar */}
@@ -3308,8 +3666,7 @@ export default function Board({
               ];
               const HL_COLORS = ['#ffd54f', '#ffb56b', '#ff8aa1', '#cf7bf0', '#8be0a8', '#5bb8ff'];
               return (
-                <div className="props-group">
-                  <span className="props-label">Format</span>
+                <PropRow id="format" label="format" value={'B · I · H1 · list…'} open={openProp} setOpen={setOpenProp}>
                   {FMT_ROWS.map((row, ri) => (
                     <div key={ri} className="props-row props-format">
                       {row.map(({ t, label, title, special }) => (
@@ -3342,14 +3699,13 @@ export default function Board({
                       ))}
                     </div>
                   )}
-                </div>
+                </PropRow>
               );
             })()}
 
             {/* Node: font family + size */}
             {isNode && (
-              <div className="props-group">
-                <span className="props-label">Font</span>
+              <><PropRow id="font" label="font" value={FONT_FAMILY_LABEL[sel.fontFamily || 'sans']} open={openProp} setOpen={setOpenProp}>
                 <div className="props-row">
                   {FONT_FAMILY_ORDER.map((f) => (
                     <button
@@ -3360,7 +3716,8 @@ export default function Board({
                     >{FONT_FAMILY_LABEL[f]}</button>
                   ))}
                 </div>
-                <span className="props-label">Size</span>
+</PropRow>
+<PropRow id="size" label="size" value={({ 12: 'S', 14: 'M', 18: 'L', 24: 'XL' })[sel.fontSize || DEFAULT_FONT_SIZE] || `${sel.fontSize}px`} open={openProp} setOpen={setOpenProp}>
                 <div className="props-row">
                   {[
                     { k: 'S', px: 12 },
@@ -3376,13 +3733,12 @@ export default function Board({
                     >{k}</button>
                   ))}
                 </div>
-              </div>
+              </PropRow></>
             )}
 
             {/* Operator pill: negate the whole sub-formula; linear formula */}
             {isArrow && arrowKindDef && arrowKindDef.render === 'text' && (
-              <div className="props-group">
-                <span className="props-label">Sub-formula</span>
+              <PropRow id="subformula" label="formula" value={sel.negated ? 'not' : 'none'} open={openProp} setOpen={setOpenProp}>
                 <div className="props-row">
                   <button
                     className={`props-btn${sel.negated ? ' active' : ''}`}
@@ -3390,13 +3746,12 @@ export default function Board({
                     title="Negate this sub-formula: ¬( … )  (⌘⇧1)"
                   >¬ NOT</button>
                 </div>
-              </div>
+              </PropRow>
             )}
 
             {/* Arrow: direction */}
             {isArrow && (
-              <div className="props-group">
-                <span className="props-label">Direction{dirLocked ? ' (locked by type)' : ''}</span>
+              <PropRow id="direction" label="direction" value={({ forward: '→', reverse: '←', both: '↔', none: '—' })[curDir] + (dirLocked ? ' (by type)' : '')} open={openProp} setOpen={setOpenProp}>
                 <div className="props-row">
                   {[
                     { d: 'forward', s: '→' },
@@ -3413,13 +3768,12 @@ export default function Board({
                     >{s}</button>
                   ))}
                 </div>
-              </div>
+              </PropRow>
             )}
 
             {/* Arrow: label text */}
             {isArrow && (
-              <div className="props-group">
-                <span className="props-label">Label</span>
+              <PropRow id="label" label="label" value={sel.label || 'none'} open={openProp} setOpen={setOpenProp}>
                 <input
                   className="props-input"
                   type="text"
@@ -3427,13 +3781,12 @@ export default function Board({
                   placeholder="Arrow label…"
                   onChange={(e) => onUpdateArrow(selectedId, { label: e.target.value })}
                 />
-              </div>
+              </PropRow>
             )}
 
             {/* Arrow: dash style */}
             {isArrow && (
-              <div className="props-group">
-                <span className="props-label">Line style</span>
+              <PropRow id="line" label="line" value={['solid', 'dashed', 'long dashes'][sel.dash || 0]} open={openProp} setOpen={setOpenProp}>
                 <div className="props-row">
                   {[0, 1, 2].map((d) => (
                     <button
@@ -3449,15 +3802,14 @@ export default function Board({
                     </button>
                   ))}
                 </div>
-              </div>
+              </PropRow>
             )}
 
             {/* Arrow: shape (curve / elbow) + edit handles */}
             {isArrow && (() => {
               const isElbow = sel.line === 'elbow' || sel.line === 'straight';
               return (
-                <div className="props-group">
-                  <span className="props-label">Shape</span>
+                <PropRow id="shape" label="shape" value={(isElbow ? 'elbow' : 'curve') + (showArrowHandles && !isElbow ? ', handles' : '')} open={openProp} setOpen={setOpenProp}>
                   <div className="props-row">
                     <button
                       className={`props-btn${!isElbow ? ' active' : ''}`}
@@ -3476,7 +3828,7 @@ export default function Board({
                       title="Show bezier control handles"
                     >Handles</button>
                   </div>
-                </div>
+                </PropRow>
               );
             })()}
           </div>
@@ -3527,6 +3879,9 @@ export default function Board({
         mode={mode}
         kbArrowDrag={kbArrowDrag}
         kbNudgeApiRef={kbNudgeApiRef}
+        docLayout={layout}
+        onTwoFingerTap={onTwoFingerTap}
+        onFingerLongPress={onFingerLongPress}
         noteFor={(id) => notes[id] || null}
         onOpenNote={onOpenNote}
       />
@@ -3547,6 +3902,36 @@ export default function Board({
   );
 }
 
+// One line of the properties panel: `name: current value`. Clicking it unfolds
+// the choices for that property (one property open at a time).
+function PropRow({ id, label, value, open, setOpen, children }) {
+  const isOpen = open === id;
+  return (
+    <div className={`props-group prop${isOpen ? ' open' : ''}`}>
+      <button
+        className="prop-row"
+        // Keep a node's text editor focused (the format buttons act on its selection).
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setOpen(isOpen ? null : id)}
+        title={isOpen ? 'Collapse' : 'Show options'}
+      >
+        <span className="prop-key">{label}</span>
+        <span className="prop-val">{value}</span>
+        <span className="prop-caret">{isOpen ? '▾' : '▸'}</span>
+      </button>
+      {isOpen && <div className="prop-body">{children}</div>}
+    </div>
+  );
+}
+
+const COLOR_NAMES = {
+  '#868e96': 'grey', '#ff6b6b': 'red', '#ffa94d': 'orange', '#ffd43b': 'yellow', '#69db7c': 'green',
+  '#38d9a9': 'teal', '#4dabf7': 'blue', '#cf7bf0': 'purple', '#f783ac': 'pink', '#ffffff': 'white',
+};
+function ColorVal({ c, locked }) {
+  return <><span className="prop-dot" style={{ background: c }} />{locked ? 'set by type' : (COLOR_NAMES[String(c).toLowerCase()] || c)}</>;
+}
+
 // Small overlay in the corner showing the active Vim-mode.
 function ModeBadge({ mode }) {
   return (
@@ -3564,6 +3949,13 @@ const SHORTCUT_SECTIONS = [
     ['3 → Space', 'arm Node, then Space to drop one'],
     ['5 → Space', 'arm Region'],
     ['6 then 1–5', 'arm Figure: 1 rect · 2 square · 3 circle · 4 ellipse · 5 triangle → Space'],
+  ]},
+  { title: 'Touch & stylus', rows: [
+    ['Stylus', 'draws / erases / selects with the current tool (pressure-sensitive)'],
+    ['1 finger', 'pan · tap to select · drag an object to move it'],
+    ['2 fingers', 'pinch to zoom, drag to pan'],
+    ['2-finger tap', 'eraser ⇄ last tool'],
+    ['Long press', 'pen options (colour, width, opacity)'],
   ]},
   { title: 'Modes (Vim-style)', rows: [
     ['Enter', 'dev ⇄ edit (edits the selected node)'],
@@ -3607,6 +3999,7 @@ const SHORTCUT_SECTIONS = [
     ['⌘/Ctrl + Z', 'undo'],
     ['⌘/Ctrl + Shift + Z', 'redo'],
     ['Delete / Backspace', 'delete selection'],
+    ['⌘C / ⌘X / ⌘V', 'copy / cut / paste objects (with their arrows and ink)'],
     ['T / V', 'text align centre ⇄ left / vertical align centre ⇄ top'],
     ['⌃7 ⌃8 ⌃9 ⌃0', 'in edit: insert $\\wedge$ $\\vee$ $\\subset$ $\\supset$'],
     ['⌃. ⌃, ⌃= ⌃`', 'in edit: insert $\\Rightarrow$ $\\Leftarrow$ $\\equiv$ $\\sim$'],
