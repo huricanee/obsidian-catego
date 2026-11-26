@@ -8,13 +8,14 @@ const THUMB_W = 96;
 // One cheap pass over the board: a fingerprint per page, so a thumbnail is
 // rebuilt only when something on ITS page changed.
 function pageSignatures(state, layout) {
-  const sig = layout.pages.map(() => [0, 0, '']);
+  const sig = layout.pages.map(() => [0, 0, '', 0]);
   const at = (cy) => sig[Math.min(layout.count - 1, pageOfY(layout, cy))];
   for (const s of state.strokes || []) {
     const b = boxOfStroke(s);
     if (b.y0 === Infinity) continue;
     const e = at((b.y0 + b.y1) / 2);
     e[0] += 1; e[1] += (s.points ? s.points.length : 0) + Math.round(b.x0 + b.y0); e[2] = s.id;
+    if (s.hl) e[3] += 1; // highlighter marks on this page
   }
   for (const n of Object.values(state.nodes || {})) {
     const e = at(n.y + (n.height || 60) / 2);
@@ -22,6 +23,7 @@ function pageSignatures(state, layout) {
   }
   return sig.map((e) => e.join(':'));
 }
+const marksOf = (sig) => Number(sig.split(':').pop()) || 0;
 
 const PageThumb = memo(function PageThumb({ page, index, getState, light, pdf, active, onPick }) {
   const ref = useRef(null);
@@ -57,7 +59,9 @@ const Icon = ({ d }) => (
  * Page strip of a paged document: thumbnails to jump by, and the page
  * operations (add, duplicate, reorder, delete) for the current page.
  */
-export default function PagePanel({ state, layout, pdf, light, current, onGo, onInsert, onDuplicate, onMove, onDelete, onImport, onClose }) {
+export default function PagePanel({ state, layout, pdf, light, current, onGo, onInsert, onDuplicate, onMove, onDelete, onImport, onExportHighlights, onClose }) {
+  // 'all' pages, or only the ones with highlighter marks (a book's highlights at a glance).
+  const [filter, setFilter] = useState('all');
   // Thumbnails read the board when they rebuild, without re-rendering on every edit.
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; });
@@ -74,10 +78,15 @@ export default function PagePanel({ state, layout, pdf, light, current, onGo, on
         <span>Pages</span>
         <button className="page-op" onClick={onClose} title="Close"><Icon d="M4 4l8 8M12 4l-8 8" /></button>
       </div>
+      <div className="page-panel-filter">
+        <button className={`opt-chip${filter === 'all' ? ' active' : ''}`} onClick={() => setFilter('all')} title="Every page">All</button>
+        <button className={`opt-chip${filter === 'marked' ? ' active' : ''}`} onClick={() => setFilter('marked')} title="Only pages with highlights">Highlights</button>
+      </div>
       <div className="page-panel-list">
-        {layout.pages.map((pg, i) => (
+        {layout.pages.map((pg, i) => (filter === 'marked' && !marksOf(sigs[i]) ? null : (
           <PageThumb key={i} page={pg} index={i} sig={sigs[i]} getState={getState} light={light} pdf={pdf} active={i === current} onPick={onGo} />
-        ))}
+        )))}
+        {filter === 'marked' && !sigs.some(marksOf) && <span className="page-panel-empty">No highlights yet</span>}
       </div>
       <div className="page-panel-ops">
         <button className="page-op" onClick={() => onInsert(current)} title="New page above this one"><Icon d="M3 9.5h10v4H3zM8 2v5M5.5 4.5h5" /></button>
@@ -87,6 +96,9 @@ export default function PagePanel({ state, layout, pdf, light, current, onGo, on
         <button className="page-op" onClick={() => onMove(current, current + 1)} disabled={current >= last - 1} title="Move this page down"><Icon d="M8 3v10M4 9l4 4 4-4" /></button>
         <button className="page-op danger" onClick={() => onDelete(current)} disabled={current === last} title="Delete this page and everything on it"><Icon d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.3a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8.3" /></button>
       </div>
+      {onExportHighlights && (
+        <button className="page-import" onClick={onExportHighlights} title="Collect all highlighted text into one Markdown note next to the notebook">Highlights → note</button>
+      )}
       {onImport && (
         <button className="page-import" onClick={onImport} title="Add a PDF: each of its pages becomes a sheet you can write on">Import PDF…</button>
       )}

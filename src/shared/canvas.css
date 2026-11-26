@@ -1855,16 +1855,20 @@
   --rule: rgba(255, 255, 255, 0.075);
 }
 /* 40px = two grid cells: a comfortable handwriting line. */
+/* The ruling starts at the sheet's own corner (not inside its 1px border) and
+   each line is CENTRED on its grid coordinate — that is where ink snaps to. */
+.doc-page.bg-ruled, .doc-page.bg-grid, .doc-page.bg-dots { background-origin: border-box; }
 .doc-page.bg-ruled {
   background-image: linear-gradient(to bottom, transparent 39px, var(--rule) 39px);
   background-size: 100% 40px;
-  background-position: 0 40px;
+  background-position: 0 0.5px;
 }
 .doc-page.bg-grid {
   background-image:
     linear-gradient(to right, var(--rule) 1px, transparent 1px),
     linear-gradient(to bottom, var(--rule) 1px, transparent 1px);
   background-size: 20px 20px;
+  background-position: -0.5px -0.5px;
 }
 .doc-page.bg-dots {
   background-image: radial-gradient(circle at 0 0, rgba(255, 255, 255, 0.20) 1px, transparent 1.2px);
@@ -2299,3 +2303,22 @@
 .opt-hint { font: 500 12px/1.2 ui-sans-serif, system-ui, sans-serif; color: var(--text-muted); padding: 2px 6px; }
 /* Pictures keep their own colours in the (inverted) light theme. */
 body.light-theme .catego-root .node-image { filter: invert(1) hue-rotate(180deg); }
+
+/* Options of a multi-selection: a popup next to the selection (placed by
+   Board — above it when there is room, otherwise below). */
+.props-panel.sel-popup,
+.catego-root .props-panel.sel-popup {
+  transform: none;
+  left: 0;
+  top: 0;
+  max-height: 60vh;
+  visibility: hidden;
+  z-index: 140;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
+}
+.props-panel.compact.sel-popup { transition: none; }
+
+/* Page strip: all pages / only the highlighted ones. */
+.page-panel-filter { display: flex; gap: 4px; padding: 6px 6px 0; }
+.page-panel-filter .opt-chip { flex: 1; justify-content: center; padding: 4px 4px; font-size: 10px; }
+.page-panel-empty { padding: 14px 8px; font: 500 11px/1.3 ui-sans-serif, system-ui, sans-serif; color: var(--text-muted); text-align: center; }

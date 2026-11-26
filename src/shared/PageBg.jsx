@@ -7,7 +7,7 @@ const MAX_PX = 2000; // widest bitmap kept per page (memory: ~4 bytes × w × h)
  * is on (or near) the screen — at a resolution that follows the zoom, and
  * released again when it scrolls away: a textbook is hundreds of pages.
  */
-export default function PageBg({ bg, pdf, cssWidth, zoom = 1, className = '' }) {
+export default function PageBg({ bg, pdf, cssWidth, zoom = 1, className = '', wantText = false }) {
   const ref = useRef(null);
   const [near, setNear] = useState(() => typeof IntersectionObserver === 'undefined');
   const [error, setError] = useState(null);
@@ -38,6 +38,10 @@ export default function PageBg({ bg, pdf, cssWidth, zoom = 1, className = '' }) 
     }).catch((e) => { if (!dead) setError(String((e && e.message) || e)); });
     return () => { dead = true; };
   }, [near, pdf, bg.src, bg.page, px]);
+
+  // The text layer of pages in view is fetched ahead, so a highlight can
+  // snap to the words the moment the pen lands.
+  useEffect(() => { if (near && wantText && pdf && pdf.textNow) pdf.textNow(bg.src, bg.page); }, [near, wantText, pdf, bg.src, bg.page]);
 
   return (
     <>

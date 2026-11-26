@@ -4,7 +4,8 @@ import './canvas.css';
 import 'katex/dist/katex.min.css';
 import { renderRichToHtml } from './richtext.js';
 import { NODE_KINDS, EDGE_KINDS, NODE_STATUSES, FONT_FAMILIES } from './argTypes.js';
-import { clampViewport, boxOfStroke } from './pages.js';
+import { clampViewport, boxOfStroke, pageOfY } from './pages.js';
+import { pdfPlacement, nearestChar, textRange } from './pdf.js';
 import { recognizeShape } from './shapeSnap.js';
 import PageBg, { AssetImg } from './PageBg.jsx';
 
@@ -887,6 +888,14 @@ export default function Canvas({
   pdf = null,
   // "Add space" tool: (y0, dy) — everything below world-y y0 moves by dy.
   onAddSpace,
+  // A stylus has been used on this device before: fingers only navigate.
+  penOnly = false,
+  onPenSeen,
+  // A click (no drag) on the selected group: (worldBounds) → options popup.
+  onSelectionTap,
+  // Highlighter over a PDF sheet snaps to the page's text (see src/pdf.js).
+  textSnap = false,
+  onAddStrokes,
 }) {
   const rootRef = useRef(null);
   const transformRef = useRef(null);
@@ -925,8 +934,14 @@ export default function Canvas({
     }
     return vp;
   }, [clampVp]);
-  const gestureRef = useRef({ onTwoFingerTap, onThreeFingerTap, onDoubleTap, onFingerLongPress });
-  useEffect(() => { gestureRef.current = { onTwoFingerTap, onThreeFingerTap, onDoubleTap, onFingerLongPress }; }, [onTwoFingerTap, onThreeFingerTap, onDoubleTap, onFingerLongPress]);
+  const gestureRef = useRef({ onTwoFingerTap, onThreeFingerTap, onDoubleTap, onFingerLongPress, onPenSeen });
+  useEffect(() => { gestureRef.current = { onTwoFingerTap, onThreeFingerTap, onDoubleTap, onFingerLongPress, onPenSeen }; }, [onTwoFingerTap, onThreeFingerTap, onDoubleTap, onFingerLongPress, onPenSeen]);
+  const onAddStrokesRef = useRef(onAddStrokes);
+  useEffect(() => { onAddStrokesRef.current = onAddStrokes; }, [onAddStrokes]);
+  const onSelectionTapRef = useRef(onSelectionTap);
+  useEffect(() => { onSelectionTapRef.current = onSelectionTap; }, [onSelectionTap]);
+  const penOnlyRef = useRef(penOnly);
+  useEffect(() => { penOnlyRef.current = penOnly; }, [penOnly]);
 
   /* ---- node height state for anchor position computation (state, not ref, so render can read it) ---- */
   const [nodeHeightMap, setNodeHeightMap] = useState({});
@@ -1020,6 +1035,9 @@ export default function Canvas({
       setDrawingPreview(gelStrokePath(cs.points, cs.width, cs.shape, cs.sl, cs.hl));
     }, HOLD_SNAP_MS);
   }, []);
+
+  /* ---- PDF text being highlighted: [{ x, y, w, h }] in world units ---- */
+  const [textSel, setTextSel] = useState(null);
 
   /* ---- Dragging node id as state for CSS class ---- */
   const [draggingNodeId, setDraggingNodeId] = useState(null);
@@ -1172,30 +1190,74 @@ export default function Canvas({
 
     const TAP_MS = 350, TAP_MOVE = 12, LONG_MS = 550;
     const BG_CLASSES = ['canvas-grid', 'canvas-transform', 'drawing-layer', 'eraser-hit-layer', 'select-hit-layer'];
-    let penSeen = false;
+    // Once a stylus has been used on this device, fingers never draw — and
+    // that is remembered across sessions (see `penOnly`).
+    let penSeen = !!penOnlyRef.current;
     let lastPenT = 0;    // when the stylus last touched / left the board
     const PALM_GUARD_MS = 1200;
     let g = null;        // the gesture in progress
     let penIsDown = false;
     // Momentum after a finger scroll (exponential decay, like a native list).
     let glide = 0;
-    const stopGlide = () => { if (glide) { cancelAnimationFrame(glide); glide = 0; commitVp(); } };
+    let glideV = null;   // current glide velocity, px/ms
+    // Stopping does not commit by itself: a commit re-renders the board, and
+    // doing that under a finger that has just landed delays its first moves.
+    // → true when a glide was running (the caller commits when it is ready).
+    const stopGlide = () => {
+      if (!glide) return null;
+      cancelAnimationFrame(glide); glide = 0;
+      const v = glideV; glideV = null;
+      return v || { vx: 0, vy: 0 };
+    };
+    const MAX_V = 9; // px/ms
     function startGlide(vx, vy) {
+      const sp = Math.hypot(vx, vy);
+      if (sp > MAX_V) { vx *= MAX_V / sp; vy *= MAX_V / sp; }
       const TAU = 325; // ms
-      let last = performance.now();
+      let last = 0;
+      glideV = { vx, vy };
       const step = (now) => {
-        const dt = Math.min(48, now - last);
+        // The first frame only sets the clock (rAF time ≠ event time).
+        const dt = last ? Math.max(0, Math.min(48, now - last)) : 0;
         last = now;
-        const k = Math.exp(-dt / TAU);
-        const before = vpRef.current;
-        const after = writeVp({ ...before, panX: before.panX + vx * dt, panY: before.panY + vy * dt });
-        vx *= k; vy *= k;
-        // Stop when slow, or when the document edge swallowed the move.
-        const stuck = after.panX === before.panX && after.panY === before.panY;
-        if (stuck || Math.hypot(vx, vy) < 0.02) { glide = 0; commitVp(); return; }
+        if (dt) {
+          const before = vpRef.current;
+          const after = writeVp({ ...before, panX: before.panX + glideV.vx * dt, panY: before.panY + glideV.vy * dt });
+          const k = Math.exp(-dt / TAU);
+          glideV.vx *= k; glideV.vy *= k;
+          // An axis the document edge swallowed stops; the other keeps going.
+          if (after.panX === before.panX) glideV.vx = 0;
+          if (after.panY === before.panY) glideV.vy = 0;
+          if (Math.hypot(glideV.vx, glideV.vy) < 0.02) { glide = 0; glideV = null; commitVp(); return; }
+        }
         glide = requestAnimationFrame(step);
       };
       glide = requestAnimationFrame(step);
+    }
+    // Speed of a trail of { x, y, t } samples (t = event time) over its last
+    // ~100 ms — null when the contact had stopped before it lifted.
+    function trailVelocity(trail, endT) {
+      if (!trail || trail.length < 2) return null;
+      const b = trail[trail.length - 1];
+      if (endT - b.t > 100) return null;
+      let a = trail[0];
+      for (const s of trail) { if (b.t - s.t <= 100) { a = s; break; } }
+      const dt = b.t - a.t;
+      if (dt < 4) return null;
+      return { vx: (b.x - a.x) / dt, vy: (b.y - a.y) / dt, span: dt };
+    }
+    const pushTrail = (trail, x, y, t) => {
+      trail.push({ x, y, t });
+      while (trail.length > 3 && t - trail[0].t > 160) trail.shift();
+    };
+    // Glide after a scroll; a flick made while the page is still gliding the
+    // same way adds to it (the way repeated flicks speed a native list up).
+    function fling(v, carry) {
+      if (!v || Math.hypot(v.vx, v.vy) < 0.1) return false;
+      let { vx, vy } = v;
+      if (carry && carry.vx * vx + carry.vy * vy > 0) { vx += carry.vx; vy += carry.vy; }
+      startGlide(vx, vy);
+      return true;
     }
     const inPalmWindow = () => penIsDown || (penSeen && Date.now() - lastPenT < PALM_GUARD_MS);
     let lastTap = null;  // { t, x, y } — for double-tap → dblclick
@@ -1283,7 +1345,7 @@ export default function Canvas({
       // resting hand: it may still scroll, but only after a decisive move, and
       // it never counts as a long press.
       const guard = penSeen && Date.now() - lastPenT < PALM_GUARD_MS;
-      g = { type: 'pan', id: t.identifier, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY, t0: Date.now(), moved: false, maxTouches: 1, longTimer: null, guard, vp0: { ...vpRef.current }, trail: [{ x: t.clientX, y: t.clientY, t: performance.now() }] };
+      g = { type: 'pan', id: t.identifier, startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY, t0: Date.now(), moved: false, maxTouches: 1, longTimer: null, guard, vp0: { ...vpRef.current }, trail: [{ x: t.clientX, y: t.clientY, t: evT }] };
       if (guard) return;
       const mine = g;
       g.longTimer = setTimeout(() => {
@@ -1302,21 +1364,26 @@ export default function Canvas({
         maxTouches: 2,
         guard: inPalmWindow(),
         vp0: from && from.vp0 ? from.vp0 : { ...vpRef.current },
+        trail: [{ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2, t: evT }],
+        dirty: from ? from.dirty : false,
+        carry: from ? from.carry : null,
       };
     }
 
+    let evT = 0; // time stamp of the event being handled
     function onTouchStart(e) {
-      stopGlide();
+      evT = e.timeStamp;
+      const stopped = stopGlide();
       const target = e.target;
       // Let native handle text being edited and real controls.
-      if (target.closest && (target.closest('[contenteditable="true"]') || target.closest('input, textarea, select, button, a'))) return;
+      if (target.closest && (target.closest('[contenteditable="true"]') || target.closest('input, textarea, select, button, a'))) { if (stopped) commitVp(); return; }
       e.preventDefault();
       e.stopPropagation(); // keep the host app's swipe gestures (Obsidian sidebars) out of it
 
       for (const t of e.changedTouches) {
         if (g && g.type === 'mouse' && g.stylus) continue; // palm while writing
         if (isStylus(t)) {
-          penSeen = true;
+          if (!penSeen) { penSeen = true; gestureRef.current.onPenSeen?.(); }
           if (g) { // fingers were navigating — the pen takes over
             clearLong();
             if (g.type === 'mouse') endMouse(null, true);
@@ -1340,6 +1407,7 @@ export default function Canvas({
         } else if (g.type === 'pan') {
           clearLong();
           const first = find(e.touches, g.id);
+          evT = e.timeStamp;
           if (first) startPinch(first, t, g);
           if (g && g.type === 'pinch' && inPalmWindow()) g.guard = true;
         } else if (g.type === 'mouse') {
@@ -1348,13 +1416,19 @@ export default function Canvas({
           const first = find(e.touches, g.id);
           // (Excalidraw's rule: under 10 points it was an accident; a longer one is kept.)
           if (dragState.current && dragState.current.type === 'draw' && currentStroke.current && currentStroke.current.points.length < 10) { currentStroke.current = null; setDrawingPreview(null); }
-          const from = { t0: g.t0, moved: g.moved };
+          const from = { t0: g.t0, moved: g.moved, dirty: false, carry: null };
           endMouse(first, true);
           if (first) startPinch(first, t, from);
         } else if (g.type === 'pinch') {
           g.maxTouches = Math.max(g.maxTouches, e.touches.length);
           g.t0 = g.t0 || Date.now();
         }
+      }
+      // A glide this touch interrupted: a scroll gesture commits the view when
+      // it ends; anything else needs the real viewport now.
+      if (stopped) {
+        if (g && (g.type === 'pan' || g.type === 'pinch')) { g.dirty = true; g.carry = stopped; }
+        else commitVp();
       }
     }
 
@@ -1376,9 +1450,7 @@ export default function Canvas({
         if (!t) return;
         // Velocity samples start with the very first move, so a short flick
         // still has a speed to glide with.
-        const nowT = performance.now();
-        g.trail.push({ x: t.clientX, y: t.clientY, t: nowT });
-        while (g.trail.length > 2 && nowT - g.trail[0].t > 90) g.trail.shift();
+        pushTrail(g.trail, t.clientX, t.clientY, e.timeStamp);
         if (!g.moved && Math.hypot(t.clientX - g.startX, t.clientY - g.startY) < (g.guard ? TAP_MOVE * 2 : TAP_MOVE / 2)) return;
         if (!g.moved) { g.moved = true; clearLong(); g.lastX = t.clientX; g.lastY = t.clientY; return; }
         const vp = vpRef.current;
@@ -1405,6 +1477,9 @@ export default function Canvas({
         const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, vp.zoom * (curDist / prevDist)));
         const k = zoom / vp.zoom;
         writeVp({ zoom, panX: cmx - (pmx - vp.panX) * k, panY: cmy - (pmy - vp.panY) * k });
+        pushTrail(g.trail, cmx, cmy, e.timeStamp);
+        // A two-finger scroll glides; a zoom does not.
+        if (Math.abs(Math.log(curDist / Math.hypot(g.start[1].x - g.start[0].x, g.start[1].y - g.start[0].y))) > 0.12) g.zoomed = true;
         g.last = cur;
       }
     }
@@ -1420,14 +1495,16 @@ export default function Canvas({
         clearLong();
         const done = g;
         g = null;
-        if (done.moved && !cancelled && done.trail.length >= 2) {
-          const a = done.trail[0], b = done.trail[done.trail.length - 1];
-          const dt = b.t - a.t;
-          const fresh = performance.now() - b.t < 90; // the finger was still moving when it left
-          const vx = dt > 0 ? (b.x - a.x) / dt : 0, vy = dt > 0 ? (b.y - a.y) / dt : 0;
-          if (fresh && Math.hypot(vx, vy) > 0.12) { startGlide(vx, vy); return; }
+        if (done.moved && !cancelled) {
+          // Speed from the event time stamps: the handlers can run late (a busy
+          // frame delivers several moves at once), the stamps do not.
+          let v = trailVelocity(done.trail, e.timeStamp);
+          // The last finger of a two-finger scroll lifts a moment after the
+          // first: it has no trail of its own yet, the pair's speed counts.
+          if ((!v || v.span < 30) && done.pinchV && e.timeStamp - done.pinchV.t < 140) v = done.pinchV;
+          if (fling(v, done.carry)) return;
         }
-        if (done.moved || cancelled) { commitVp(); return; }
+        if (done.moved || cancelled || done.dirty) { commitVp(); return; }
         if (done.guard) return;
         // Two quick taps: eraser ⇄ last tool.
         const nowTap = Date.now();
@@ -1451,13 +1528,18 @@ export default function Canvas({
           if (done.maxTouches === 3) gestureRef.current.onThreeFingerTap?.();
           else gestureRef.current.onTwoFingerTap?.();
           // The remaining fingers of this tap are lifting too — not a new gesture.
+          if (done.dirty) commitVp();
           return;
-        } else {
-          commitVp();
         }
-        // One finger still down: keep panning with it.
+        // One finger still down: keep panning with it (its end commits the view).
         const rest = find(e.touches, done.ids[0]) || find(e.touches, done.ids[1]);
-        if (rest) { startPan(rest); clearLong(); g.moved = true; }
+        const pv = done.moved && !cancelled && !done.zoomed ? trailVelocity(done.trail, e.timeStamp) : null;
+        if (rest) {
+          evT = e.timeStamp;
+          startPan(rest); clearLong(); g.moved = true;
+          g.carry = done.carry;
+          if (pv) g.pinchV = { ...pv, t: e.timeStamp };
+        } else if (!fling(pv, done.carry)) commitVp();
       }
     }
     const onTouchEnd = (e) => finish(e, false);
@@ -2070,6 +2152,24 @@ export default function Canvas({
       return;
     }
 
+    if (toolMode === 'draw' && drawFlat && textSnap && pdf && pdf.textNow && docLayoutRef.current) {
+      // Highlighter that lands on the text of a PDF page marks the text itself.
+      const lay = docLayoutRef.current;
+      const pg = lay.pages[Math.min(lay.count - 1, pageOfY(lay, world.y))];
+      const text = pg && pg.bg && world.y >= pg.y && world.y <= pg.y + pg.h ? pdf.textNow(pg.bg.src, pg.bg.page) : null;
+      if (text && text.chars.length) {
+        const pl = pdfPlacement(pg, text);
+        const hit = nearestChar(text, (world.x - pl.ox) / pl.s, (world.y - pl.oy) / pl.s);
+        const c = text.chars[hit.index];
+        if (c && hit.dist < (c.bot - c.top) * 0.8) {
+          e.preventDefault();
+          dragState.current = { type: 'textHl', text, pl, a: hit.index, b: hit.index, color: drawColor || '#ffd43b', opacity: drawOpacity == null ? 35 : drawOpacity };
+          setTextSel(textRange(text, hit.index, hit.index).rects.map((r) => ({ x: pl.ox + r.x0 * pl.s, y: pl.oy + r.top * pl.s, w: (r.x1 - r.x0) * pl.s, h: (r.bot - r.top) * pl.s })));
+          return;
+        }
+      }
+    }
+
     if (toolMode === 'draw') {
       // Start freehand drawing
       e.preventDefault();
@@ -2144,7 +2244,7 @@ export default function Canvas({
       };
       return;
     }
-  }, [onSelect, toolMode, drawColor, drawWidth, drawOpacity, drawFlat, drawStraight, screenToWorld, onSelectionChange, selection, selectFree]);
+  }, [onSelect, toolMode, drawColor, drawWidth, drawOpacity, drawFlat, drawStraight, screenToWorld, onSelectionChange, selection, selectFree, textSnap, pdf]);
 
   /* ================================================================
      Eraser perform helper
@@ -2638,6 +2738,17 @@ export default function Canvas({
         return;
       }
 
+      if (ds.type === 'textHl') {
+        const vp = vpRef.current;
+        const hit = nearestChar(ds.text, ((mx - vp.panX) / vp.zoom - ds.pl.ox) / ds.pl.s, ((my - vp.panY) / vp.zoom - ds.pl.oy) / ds.pl.s);
+        if (hit.index >= 0 && hit.index !== ds.b) {
+          ds.b = hit.index;
+          const pl = ds.pl;
+          setTextSel(textRange(ds.text, ds.a, ds.b).rects.map((r) => ({ x: pl.ox + r.x0 * pl.s, y: pl.oy + r.top * pl.s, w: (r.x1 - r.x0) * pl.s, h: (r.bot - r.top) * pl.s })));
+        }
+        return;
+      }
+
       if (ds.type === 'selectionDrag') {
         // The displacement (in cells) is magnetised: whole-cell moves stick,
         // everything in between is reachable. `applied` is what the board
@@ -2645,6 +2756,7 @@ export default function Canvas({
         const vp = vpRef.current;
         const rawX = (mx - vp.panX) / vp.zoom - ds.startWorldX;
         const rawY = (my - vp.panY) / vp.zoom - ds.startWorldY;
+        if (Math.hypot(rawX, rawY) * vp.zoom > 5) ds.far = true;
         const free = e.metaKey || e.ctrlKey; // Ctrl/Cmd: no magnet
         // A group with nodes moves in whole cells; ink alone is magnetic.
         const hard = selectionRef.current.nodeIds.size > 0 || (selectionRef.current.regionIds && selectionRef.current.regionIds.size > 0);
@@ -3164,6 +3276,24 @@ export default function Canvas({
           // Start panning instead
         }
       }
+      if (ds && ds.type === 'textHl') {
+        setTextSel(null);
+        const { rects, text } = textRange(ds.text, ds.a, ds.b);
+        const pl = ds.pl;
+        const th = `th${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+        // One straight highlighter stroke per line of text: they behave like
+        // any other ink (erase, select, move with the page) and carry the words.
+        const made = rects.map((r) => {
+          const h = (r.bot - r.top) * pl.s;
+          const y = pl.oy + ((r.top + r.bot) / 2) * pl.s;
+          const x0 = pl.ox + r.x0 * pl.s + h / 2;
+          const x1 = Math.max(x0 + 0.5, pl.ox + r.x1 * pl.s - h / 2);
+          return { points: [{ x: x0, y }, { x: x1, y }], color: ds.color, width: Math.round(h * 10) / 10, opacity: ds.opacity, hl: true, shape: 'line', th, text };
+        });
+        if (made.length && text) {
+          if (onAddStrokesRef.current) onAddStrokesRef.current(made);
+        }
+      }
       if (ds && ds.type === 'selectionDrag') {
         // Nodes live on the grid: settle the group onto whole cells. Ink alone
         // keeps the (magnetised) position it was dropped at.
@@ -3173,6 +3303,11 @@ export default function Canvas({
           if (fx !== 0 || fy !== 0) onMoveSelection(fx, fy);
         }
         onSelectionDragEnd();
+        // A press without a drag is a click on the selection: its options pop up.
+        if (!ds.far && !ds.appliedX && !ds.appliedY && onSelectionTapRef.current) {
+          const b = getSelectionBounds(selectionRef.current, nodesRef.current, drawStrokesRef.current, nodeHeightRef.current);
+          if (b) onSelectionTapRef.current(b);
+        }
       }
       if (ds && (ds.type === 'selResize' || (ds.type === 'selRotate' && ds.angle) || (ds.type === 'lineEnd' && ds.moved))) {
         onSelectionDragEnd();
@@ -4663,7 +4798,7 @@ export default function Canvas({
             {docLayout.pages.map((pg, i) => (
               <div key={i} className={`doc-page bg-${pg.bg ? 'pdf' : docLayout.bg}`}
                 style={{ left: pg.x, top: pg.y, width: pg.w, height: pg.h }}>
-                {pg.bg && <PageBg bg={pg.bg} pdf={pdf} cssWidth={pg.w} zoom={zoom} />}
+                {pg.bg && <PageBg bg={pg.bg} pdf={pdf} cssWidth={pg.w} zoom={zoom} wantText={textSnap} />}
                 <span className="doc-page-num">{i + 1}</span>
               </div>
             ))}
@@ -4779,6 +4914,13 @@ export default function Canvas({
               strokeWidth={1 / zoom}
               strokeDasharray={`${6 / zoom} ${4 / zoom}`}
             />
+          </svg>
+        )}
+
+        {/* Text being highlighted on a PDF page */}
+        {textSel && (
+          <svg className="select-rect-layer" width="1" height="1">
+            {textSel.map((r, i) => <rect key={i} x={r.x} y={r.y} width={r.w} height={r.h} rx={r.h / 2} fill={drawColor || '#ffd43b'} opacity={0.4} />)}
           </svg>
         )}
 

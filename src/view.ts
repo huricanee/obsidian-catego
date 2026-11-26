@@ -105,6 +105,7 @@ export class CategoView extends TextFileView {
         onPersist: (g: any) => this.persist(g),
         onOpenNote: (p: string) => this.openNote(p),
         onRenameNoteFile: (oldPath: string, newTitle: string) => this.renameNoteFile(oldPath, newTitle),
+        onSaveNote: (kind: string, markdown: string) => this.saveNote(kind, markdown),
         bridge: this.bridge,
         isolateKeys: true,
         prefs: this.prefs,
@@ -134,6 +135,18 @@ export class CategoView extends TextFileView {
     this.board.doc = graph.doc || null;
     if (graph.notes) this.board.notes = graph.notes;
     this.requestSave();
+  }
+
+  /** A note generated from the board (its highlights): `Name — kind.md` next to it. */
+  private async saveNote(kind: string, markdown: string): Promise<string> {
+    if (!this.file) throw new Error('no file');
+    const dir = this.file.parent && this.file.parent.path !== '/' ? `${this.file.parent.path}/` : '';
+    const path = normalizePath(`${dir}${this.file.basename} — ${kind}.md`);
+    const body = `# ${this.file.basename} — ${kind}\n\n${markdown}`;
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) await this.app.vault.modify(existing, body);
+    else await this.app.vault.create(path, body);
+    return path.split('/').pop() as string;
   }
 
   // --- agent inbox -----------------------------------------------------------

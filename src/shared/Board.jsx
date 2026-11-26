@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import { useLayoutEffect, useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import Canvas, { NEW_NODE_W, NEW_NODE_H, MIN_ZOOM, MAX_ZOOM } from './Canvas.jsx';
 import { NODE_KINDS, NODE_KIND_ORDER, EDGE_KINDS, EDGE_KIND_ORDER, NODE_STATUSES, NODE_STATUS_ROWS, FONT_FAMILY_ORDER, FONT_FAMILY_LABEL, DEFAULT_FONT_SIZE } from './argTypes.js';
 
@@ -59,7 +59,7 @@ import { jsPDF } from 'jspdf';
 import { buildExportSvg, svgToCanvas, invertCanvas } from './exportSvg.js';
 import { buildGraphFromDsl } from './dslImport.js';
 import { serializeToDsl } from './dslExport.js';
-import { PAPERS, PAGE_BGS, makeDoc, normalizeDoc, docLayout as computeDocLayout, clampViewport, fitPageViewport, pageIndexAt, contentBounds, insertPage, deletePage, movePage, duplicatePage, shiftBelow, sliceRect } from './pages.js';
+import { PAPERS, PAGE_BGS, makeDoc, normalizeDoc, docLayout as computeDocLayout, clampViewport, fitPageViewport, pageIndexAt, contentBounds, insertPage, deletePage, movePage, duplicatePage, shiftBelow, sliceRect, pageOfY } from './pages.js';
 import { makePdfService } from './pdf.js';
 import { applyAgentOps } from './agentOps.js';
 import PagePanel from './PagePanel.jsx';
@@ -253,6 +253,8 @@ export default function Board({
   initial = null, onPersist, useSyncHook = useNoSync, overlay = null,
   renderRegionExtras = null, isolateKeys = false, defaultZoom = 1, prefs: prefsProp = null,
   onOpenNote, onRenameNoteFile, bridge, assets = null, loadPdfJs = null,
+  // (title, markdown) → the host stores a generated note next to the board.
+  onSaveNote = null,
 }) {
   const isMobile = useMobile();
   const rootRef = useRef(null);
@@ -316,6 +318,25 @@ export default function Board({
   // on a touch screen it opens on demand (tap the pen button again, or
   // long-press the board with a finger) and closes once you write.
   const [penPanelOpen, setPenPanelOpen] = useState(true);
+  // Options bars of the other tools: pressing the active tool's button again
+  // hides / shows its bar (remembered).
+  const [optsHidden, setOptsHidden] = useState(() => {
+    try { return JSON.parse(prefs.get('catego-opts-hidden') || '{}') || {}; } catch { return {}; }
+  });
+  const toggleOpts = useCallback((key) => setOptsHidden((h) => {
+    const next = { ...h, [key]: !h[key] };
+    prefs.set('catego-opts-hidden', JSON.stringify(next));
+    return next;
+  }), [prefs]);
+  // A stylus has been used on this device: from then on fingers only scroll,
+  // zoom and tap — they never draw (remembered, so it holds from the first
+  // touch of every later session).
+  const [penOnly, setPenOnly] = useState(() => prefs.get('catego-pen-seen') === 'true');
+  const onPenSeen = useCallback(() => { setPenOnly(true); prefs.set('catego-pen-seen', 'true'); }, [prefs]);
+  // Options of a multi-selection: a popup next to the selection, opened by
+  // clicking the selected objects (world-space bounds of the selection).
+  const [selPopup, setSelPopup] = useState(null);
+  const selPopupRef = useRef(null);
   // Properties panel: every property is one `name: value` line; the one
   // named here is unfolded to show its choices.
   const [openProp, setOpenProp] = useState(null);
@@ -335,6 +356,9 @@ export default function Board({
   // Highlighter draws ruler-straight lines (start → end).
   const [hlStraight, setHlStraight] = useState(() => prefs.get('catego-hl-straight') !== 'false');
   useEffect(() => { prefs.set('catego-hl-straight', String(hlStraight)); }, [hlStraight, prefs]);
+  // Highlighter on a PDF page marks the page's own text (when it starts on text).
+  const [hlText, setHlText] = useState(() => prefs.get('catego-hl-text') !== 'false');
+  useEffect(() => { prefs.set('catego-hl-text', String(hlText)); }, [hlText, prefs]);
   // Page strip (paged documents).
   const [pagesOpen, setPagesOpen] = useState(false);
   // Page-setup popover (infinite board ⇄ sheets).
@@ -411,9 +435,10 @@ export default function Board({
 
   // Placement tools: toolMode 'node' | 'region' | 'figure' — click or drag on
   // the canvas to create the object (Excalidraw-style). For 'figure', the
-  // shape is held here. `6` arms a pending figure that 1–5 then picks.
+  // shape is held here. `9` arms a pending figure that 1–5 then picks.
   const [figureShape, setFigureShape] = useState('rect');
-  const figurePendingRef = useRef(0); // timestamp of a pending `6` (awaiting 1–5)
+  const figurePendingRef = useRef(0); // timestamp of a pending `9` (awaiting 1–5)
+  const hotkeyRef = useRef({ pen: () => {}, text: () => {} });
   useEffect(() => {
     if (!printMenuOpen) return;
     function onDocDown(e) {
@@ -1093,6 +1118,81 @@ export default function Board({
     setSelectedId(null);
     setSelectedType(null);
   }, [setStateWithHistory, send]);
+
+  // Several strokes as ONE undo step (a text highlight is one stroke per line).
+  const onAddStrokes = useCallback((list) => {
+    const made = (list || []).map((st) => ({ ...st, id: st.id || genId('s') }));
+    if (!made.length) return;
+    setStateWithHistory((prev) => {
+      const have = new Set((prev.strokes || []).map((s) => s.id));
+      const fresh = made.filter((s) => !have.has(s.id));
+      return fresh.length ? { ...prev, strokes: [...(prev.strokes || []), ...fresh] } : prev;
+    });
+    for (const st of made) send({ type: 'stroke:add', stroke: st });
+  }, [setStateWithHistory, send]);
+
+  // Text highlights of the board, in reading order: [{ page, pdf, text }].
+  const collectHighlights = useCallback(() => {
+    const st = stateRef.current;
+    const lay = layoutRef.current;
+    const seen = new Map();
+    for (const s of st.strokes || []) {
+      if (!s.th || !s.text || !s.points || !s.points.length) continue;
+      const y = s.points[0].y, x = s.points[0].x;
+      const e = seen.get(s.th);
+      if (!e) seen.set(s.th, { text: s.text, x, y });
+      else if (y < e.y) { e.y = y; e.x = x; }
+    }
+    return [...seen.values()].sort((a, b) => a.y - b.y || a.x - b.x).map((e) => {
+      const page = lay ? Math.min(lay.count - 1, pageOfY(lay, e.y)) : 0;
+      return { page: page + 1, pdf: lay && lay.pages[page] ? lay.pages[page].bg || null : null, text: e.text };
+    });
+  }, []);
+
+  // All text highlights → one Markdown note (the host decides where it goes).
+  const exportHighlights = useCallback(async () => {
+    const items = collectHighlights();
+    if (!items.length) { setBusyNote('No text highlights yet'); setTimeout(() => setBusyNote(null), 1800); return; }
+    const out = ['*Generated from the notebook — exporting again rewrites this note.*', ''];
+    let last = null;
+    for (const it of items) {
+      const key = `${it.page}`;
+      if (key !== last) {
+        last = key;
+        // A vault PDF gets a link that opens it on that page.
+        const linkable = it.pdf && !/^(idb:|data:|blob:)/.test(it.pdf.src);
+        out.push(linkable ? `## Page ${it.page} · [[${it.pdf.src}#page=${it.pdf.page}|${String(it.pdf.src).split('/').pop()} p. ${it.pdf.page}]]` : `## Page ${it.page}`, '');
+      }
+      out.push(`> ${it.text}`, '');
+    }
+    const md = out.join('\n');
+    try {
+      if (onSaveNote) {
+        const where = await onSaveNote('highlights', md);
+        setBusyNote(where ? `Saved ${where}` : 'Highlights saved');
+      } else {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+        a.download = 'highlights.md';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+        setBusyNote('Highlights downloaded');
+      }
+    } catch (e) { setBusyNote(`Could not save: ${(e && e.message) || e}`); }
+    setTimeout(() => setBusyNote(null), 2400);
+  }, [collectHighlights, onSaveNote]);
+
+  // Words of the selected text highlights → clipboard.
+  const copySelectedText = useCallback(() => {
+    const ids = selection.strokeIds;
+    const seen = new Set();
+    const parts = [];
+    for (const s of stateRef.current.strokes || []) {
+      if (!ids.has(s.id) || !s.text || seen.has(s.th || s.id)) continue;
+      seen.add(s.th || s.id); parts.push(s.text);
+    }
+    if (parts.length && navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(parts.join('\n\n')).catch(() => {});
+  }, [selection]);
 
   const onAddStroke = useCallback((stroke) => {
     const strokeWithId = { ...stroke, id: stroke.id || genId('s') };
@@ -2978,6 +3078,62 @@ export default function Board({
     setToolMode('draw');
   }, [toolMode, penKind, switchPenKind]);
 
+  // Selection popup: any press on the board (outside the popup), a scroll or
+  // a change of the selection closes it; a click on the selection reopens it.
+  useEffect(() => { setSelPopup(null); }, [selection]);
+  useEffect(() => {
+    if (!selPopup) return undefined;
+    const root = rootRef.current;
+    if (!root) return undefined;
+    const close = (e) => {
+      if (e.target && e.target.closest && e.target.closest('.sel-popup')) return;
+      setSelPopup(null);
+    };
+    root.addEventListener('mousedown', close, true);
+    root.addEventListener('touchstart', close, true);
+    root.addEventListener('wheel', close, true);
+    return () => {
+      root.removeEventListener('mousedown', close, true);
+      root.removeEventListener('touchstart', close, true);
+      root.removeEventListener('wheel', close, true);
+    };
+  }, [selPopup]);
+  // Placed above the selection when there is room (clear of the rotate
+  // handle), otherwise below it, otherwise pinned inside the view.
+  useLayoutEffect(() => {
+    const el = selPopupRef.current;
+    const root = rootRef.current;
+    if (!el || !root || !selPopup || !el.classList.contains('sel-popup')) return;
+    const canvas = root.querySelector('.canvas-root') || root;
+    const cr = canvas.getBoundingClientRect();
+    const vp = getActualViewport();
+    const top = cr.top + vp.panY + selPopup.y * vp.zoom;
+    const bottom = top + selPopup.h * vp.zoom;
+    const cx = cr.left + vp.panX + (selPopup.x + selPopup.w / 2) * vp.zoom;
+    // Panels can carry a CSS `zoom` (UI scale): measure on screen, write unscaled.
+    const er = el.getBoundingClientRect();
+    const w = er.width, h = er.height;
+    const k = el.offsetWidth ? er.width / el.offsetWidth : 1;
+    const minTop = cr.top + 8, maxBottom = cr.bottom - 8;
+    let y;
+    if (top - 52 - h >= minTop) y = top - 52 - h;
+    else if (bottom + 20 + h <= maxBottom) y = bottom + 20;
+    else y = Math.max(minTop, maxBottom - h);
+    const x = Math.max(cr.left + 8, Math.min(cr.right - 8 - w, cx - w / 2));
+    // `fixed` on the web, `absolute` inside the plugin's pane.
+    const base = el.offsetParent ? el.offsetParent.getBoundingClientRect() : { left: 0, top: 0 };
+    el.style.left = `${Math.round((x - base.left) / k)}px`;
+    el.style.top = `${Math.round((y - base.top) / k)}px`;
+    el.style.visibility = 'visible';
+  });
+
+  // Digit hotkeys reach these through a ref (their listener is bound once).
+  useEffect(() => {
+    hotkeyRef.current.pen = (kind) => { switchPenKind(kind); setToolMode('draw'); };
+  }, [switchPenKind]);
+  useEffect(() => { hotkeyRef.current.text = () => handleAddTextRef.current && handleAddTextRef.current(); }, []);
+  const handleAddTextRef = useRef(null);
+
   /* ================================================================
      Toolbar actions
      ================================================================ */
@@ -3012,6 +3168,8 @@ export default function Board({
     setSelectedId(id);
     setSelectedType('node');
   }, [getActualViewport, setStateWithHistory, send]);
+
+  useEffect(() => { handleAddTextRef.current = handleAddText; }, [handleAddText]);
 
   const handleAddRegion = useCallback(() => {
     const vp = getActualViewport();
@@ -3274,7 +3432,7 @@ export default function Board({
       }
       if (e.shiftKey) return; // leave Shift+letter (kinds) alone
 
-      // Figure two-key combo: `6` then 1–5 picks the shape, enters figure mode.
+      // Figure two-key combo: `9` then 1–5 picks the shape, enters figure mode.
       const FIG = { Digit1: 'rect', Digit2: 'square', Digit3: 'circle', Digit4: 'ellipse', Digit5: 'triangle' };
       if (figurePendingRef.current && (Date.now() - figurePendingRef.current) < 1500 && FIG[e.code]) {
         figurePendingRef.current = 0;
@@ -3282,21 +3440,27 @@ export default function Board({
         e.preventDefault();
         return;
       }
-      if (e.code === 'Digit6') { figurePendingRef.current = Date.now(); e.preventDefault(); return; }
+      if (e.code === 'Digit9') { figurePendingRef.current = Date.now(); e.preventDefault(); return; }
       figurePendingRef.current = 0;
 
-      // Digits 1–8. 1 Select · 2 Move · 3 Node · 4 Arrow ·
-      // 5 Region · 6X Figure · 7 Draw · 8 Eraser. Node/Region/Figure are
-      // placement MODES — click or drag on the canvas to create.
+      // Digits follow the toolbar left to right: 1 Select (again: rectangle ⇄
+      // lasso) · 2 Pen · 3 Highlighter · 4 Eraser · 5 Text · 6 Node · 7 Arrow ·
+      // 8 Region · 9X Figure · H Move (0 stays zoom reset). Node/Region/Figure are placement MODES —
+      // click or drag on the canvas to create.
       switch (e.code) {
-        case 'Digit1': setToolMode('select'); setShowDrawOptions(false); break;
-        case 'Digit2': setToolMode('move'); setShowDrawOptions(false); break;
-        case 'Digit3': setToolMode('node'); break;
-        case 'Digit4': setToolMode('arrow'); setShowDrawOptions(false); break;
-        case 'Digit5': setToolMode('region'); break;
-        case 'Digit7': setToolMode('draw'); break;
-        case 'Digit8': setToolMode('eraser'); setShowDrawOptions(false); break;
-        case 'Digit9': setSelectKind((k) => (k === 'lasso' ? 'rect' : 'lasso')); setToolMode('select'); break;
+        case 'Digit1': {
+          const cur = toolModeRef.current;
+          if (cur === 'select' || cur === 'lasso') setSelectKind((k) => (k === 'lasso' ? 'rect' : 'lasso'));
+          setToolMode('select'); setShowDrawOptions(false); break;
+        }
+        case 'Digit2': hotkeyRef.current.pen('pen'); break;
+        case 'Digit3': hotkeyRef.current.pen('highlighter'); break;
+        case 'Digit4': setToolMode('eraser'); setShowDrawOptions(false); break;
+        case 'Digit5': hotkeyRef.current.text(); break;
+        case 'Digit6': setToolMode('node'); break;
+        case 'Digit7': setToolMode('arrow'); setShowDrawOptions(false); break;
+        case 'Digit8': setToolMode('region'); break;
+        case 'KeyH': if (e.metaKey || e.ctrlKey || e.altKey) return; setToolMode('move'); setShowDrawOptions(false); break;
         default: return;
       }
       e.preventDefault();
@@ -3352,8 +3516,8 @@ export default function Board({
       <div className="toolbar toolbar-tools">
         <button
           className={`toolbar-btn${(toolMode === 'select' || toolMode === 'lasso') ? ' tool-active' : ''}`}
-          onClick={() => setToolMode('select')}
-          title="Select — rectangle or lasso (options below)"
+          onClick={() => ((toolMode === 'select' || toolMode === 'lasso') ? toggleOpts('select') : setToolMode('select'))}
+          title="Select — press again to show / hide its options"
         >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <path d="M3 2l2 12 3-4 5-1L3 2z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" fill="none" />
@@ -3368,7 +3532,7 @@ export default function Board({
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <path d="M2.5 13.5s1-2 3-4 4-3.5 5.5-5S13 2.5 13 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
           </svg>
-          <span className="hk-pill">7</span>
+          <span className="hk-pill">2</span>
         </button>
         <button
           className={`toolbar-btn${(toolMode === 'draw' && penKind === 'highlighter') ? ' tool-active' : ''}`}
@@ -3378,21 +3542,23 @@ export default function Board({
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <path d="M9.2 2.6l4.2 4.2-6 6H3.2V8.6l6-6z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /><path d="M2 14.6h12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" opacity="0.55" />
           </svg>
+          <span className="hk-pill">3</span>
         </button>
         <button
           className={`toolbar-btn${toolMode === 'eraser' ? ' tool-active' : ''}`}
-          onClick={() => setToolMode('eraser')}
-          title="Eraser"
+          onClick={() => (toolMode === 'eraser' ? toggleOpts('eraser') : setToolMode('eraser'))}
+          title="Eraser — press again to show / hide its options"
         >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <path d="M6 14h8M3.5 11.5l7-7a1.41 1.41 0 012 2l-7 7H3l-.5-.5a1.41 1.41 0 010-2z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-          <span className="hk-pill">8</span>
+          <span className="hk-pill">4</span>
         </button>
         <button className="toolbar-btn" onClick={handleAddText} title="Add Text">
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <path d="M3 4V3h10v1M8 3v10M6 13h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
+          <span className="hk-pill">5</span>
         </button>
         <button
           className={`toolbar-btn${toolMode === 'node' ? ' tool-active' : ''}`}
@@ -3402,7 +3568,7 @@ export default function Board({
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <rect x="2" y="4.5" width="12" height="7" rx="2" stroke="currentColor" strokeWidth="1.5" fill="none" />
           </svg>
-          <span className="hk-pill">3</span>
+          <span className="hk-pill">6</span>
         </button>
         <button
           className={`toolbar-btn${toolMode === 'arrow' ? ' tool-active' : ''}`}
@@ -3412,7 +3578,7 @@ export default function Board({
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <path d="M3 13L13 3M8.5 3H13V7.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-          <span className="hk-pill">4</span>
+          <span className="hk-pill">7</span>
         </button>
         <button
           className={`toolbar-btn${toolMode === 'region' ? ' tool-active' : ''}`}
@@ -3422,7 +3588,7 @@ export default function Board({
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <path d="M2.5 6.2h11v7.3h-11z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /><path d="M2.5 6.2V3.4h5v2.8" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /><path d="M4.2 4.8h1.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
           </svg>
-          <span className="hk-pill">5</span>
+          <span className="hk-pill">8</span>
         </button>
         <div style={{ position: 'relative' }}>
           <button
@@ -3434,7 +3600,7 @@ export default function Board({
               <rect x="1.5" y="7" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.4" fill="none" />
               <circle cx="11" cy="5.5" r="3.4" stroke="currentColor" strokeWidth="1.4" fill="none" />
             </svg>
-                    <span className="hk-pill">6</span>
+                    <span className="hk-pill">9</span>
         </button>
           {figureMenuOpen && (
             <div className="figure-menu">
@@ -3452,7 +3618,7 @@ export default function Board({
                   title={title}
                 >
                   <svg width="18" height="18" viewBox="0 0 16 16" fill="none">{icon}</svg>
-                  <span className="hk-pill">{`6·${fi + 1}`}</span>
+                  <span className="hk-pill">{`9·${fi + 1}`}</span>
                 </button>
               ))}
             </div>
@@ -3484,17 +3650,17 @@ export default function Board({
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
             <path d="M8 1v14M1 8h14M8 1l-2.5 2.5M8 1l2.5 2.5M8 15l-2.5-2.5M8 15l2.5-2.5M1 8l2.5-2.5M1 8l2.5 2.5M15 8l-2.5-2.5M15 8l-2.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-          <span className="hk-pill">2</span>
+          <span className="hk-pill">H</span>
         </button>
 
         {/* Options of the active tool — a slim bar hanging under the toolbar. */}
-        {(toolMode === 'select' || toolMode === 'lasso') && (
+        {(toolMode === 'select' || toolMode === 'lasso') && !optsHidden.select && (
           <div className="tool-options">
             <button className={`opt-chip${selectKind === 'rect' ? ' active' : ''}`} onClick={() => setSelectKind('rect')} title="Drag a rectangle to select">
               <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="3.5" width="11" height="9" rx="1" stroke="currentColor" strokeWidth="1.4" strokeDasharray="2.4 1.8" /></svg>
               Rectangle
             </button>
-            <button className={`opt-chip${selectKind === 'lasso' ? ' active' : ''}`} onClick={() => setSelectKind('lasso')} title="Draw a loop around ink and nodes (9)">
+            <button className={`opt-chip${selectKind === 'lasso' ? ' active' : ''}`} onClick={() => setSelectKind('lasso')} title="Draw a loop around ink and nodes (press 1 again)">
               <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
                 <path d="M8 2.2c3.3 0 5.8 1.6 5.8 3.9S11.3 10 8 10 2.2 8.4 2.2 6.1 4.7 2.2 8 2.2z" stroke="currentColor" strokeWidth="1.4" strokeDasharray="2.6 1.8" />
                 <path d="M5.2 9.6c-.9.6-1.2 1.6-.6 2.3.6.7 1.7.5 2-.3.3-.9-.6-1.3-1.5-.9-1 .5-1.6 1.6-1.4 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
@@ -3560,11 +3726,12 @@ export default function Board({
               <>
                 <span className="opt-sep" />
                 <button className={`opt-chip${hlStraight ? ' active' : ''}`} onClick={() => setHlStraight((v) => !v)} title="Draw ruler-straight highlights (Shift snaps the angle)">Straight</button>
+                {pdf && <button className={`opt-chip${hlText ? ' active' : ''}`} onClick={() => setHlText((v) => !v)} title="On a PDF page, a highlight that starts on text marks the text itself (and keeps its words)">Text</button>}
               </>
             )}
           </div>
         )}
-        {toolMode === 'eraser' && (
+        {toolMode === 'eraser' && !optsHidden.eraser && (
           <div className="tool-options">
             <button className={`opt-chip${eraserMode === 'object' ? ' active' : ''}`} onClick={() => setEraserMode('object')} title="Removes whole strokes and objects">Whole</button>
             <button className={`opt-chip${eraserMode === 'pixel' ? ' active' : ''}`} onClick={() => setEraserMode('pixel')} title="Rubs out parts of strokes">Partial</button>
@@ -3835,12 +4002,14 @@ export default function Board({
       {(() => {
         const items = bulkSelected();
         const inkIds = selection.strokeIds;
-        // The pen options own the left edge while drawing.
-        if ((items.length < 2 && inkIds.size === 0) || !propsOpen || toolMode === 'draw') return null;
+        // A popup next to the selection, opened by clicking the selected
+        // objects. (Phones keep the docked panel: no room for a popup.)
+        if (items.length < 2 && inkIds.size === 0) return null;
+        if (isMobile ? (!propsOpen || toolMode === 'draw') : !selPopup) return null;
         const nodeCount = items.filter((i) => i.type === 'node').length;
         const firstInk = inkIds.size ? strokes.find((st) => inkIds.has(st.id)) : null;
         return (
-          <div className={`props-panel compact${openProp ? ' has-open' : ''}`}>
+          <div ref={selPopupRef} className={`props-panel compact${openProp ? ' has-open' : ''}${isMobile ? '' : ' sel-popup'}`}>
             <div className="props-title">{items.length + inkIds.size} selected</div>
             <div className="props-group">
               <div className="seg-row">
@@ -3848,9 +4017,11 @@ export default function Board({
                 <button className="seg-btn" onClick={copySelection} title="Copy (⌘C)">Copy</button>
                 <button className="seg-btn" onClick={deleteAnySelection} title="Delete">Delete</button>
               </div>
-              <span className="props-label" style={{ opacity: 0.7, textTransform: 'none', letterSpacing: 0, marginTop: 6 }}>
-                Drag the round handle at the corner of the selection to resize it.
-              </span>
+              {strokes.some((st) => inkIds.has(st.id) && st.text) && (
+                <div className="seg-row" style={{ marginTop: 4 }}>
+                  <button className="seg-btn" onClick={copySelectedText} title="Copy the highlighted words">Copy text</button>
+                </div>
+              )}
             </div>
             {firstInk && (
               <><PropRow id="inkw" label="ink width" value={Math.round((firstInk.width || 2) * 10) / 10} open={openProp} setOpen={setOpenProp}>
@@ -4340,6 +4511,8 @@ export default function Board({
         drawOpacity={drawOpacity}
         drawFlat={penKind === 'highlighter'}
         drawStraight={penKind === 'highlighter' && hlStraight}
+        textSnap={penKind === 'highlighter' && hlText && !!pdf}
+        onAddStrokes={onAddStrokes}
         eraserTarget={eraserTarget}
         assets={assets}
         pdf={pdf}
@@ -4381,6 +4554,9 @@ export default function Board({
         onDoubleTap={onDoubleTap}
         selectFree={selectKind === 'lasso'}
         onFingerLongPress={onFingerLongPress}
+        penOnly={penOnly}
+        onPenSeen={onPenSeen}
+        onSelectionTap={setSelPopup}
         noteFor={(id) => notes[id] || null}
         onOpenNote={onOpenNote}
       />
@@ -4408,6 +4584,7 @@ export default function Board({
           state={state} layout={layout} pdf={pdf} light={false} current={currentPage}
           onGo={goToPage} onInsert={onInsertPage} onDuplicate={onDuplicatePage} onMove={onMovePage} onDelete={onDeletePage}
           onImport={pdf ? () => pickFiles('application/pdf') : null}
+          onExportHighlights={exportHighlights}
           onClose={() => setPagesOpen(false)}
         />
       )}
@@ -4460,11 +4637,11 @@ function ModeBadge({ mode }) {
 // Full keyboard cheat-sheet, toggled with `?`.
 const SHORTCUT_SECTIONS = [
   { title: 'Tools (digits)', rows: [
-    ['1', 'Select'], ['2', 'Move / pan'], ['4', 'Arrow tool'],
-    ['7', 'Draw'], ['8', 'Eraser'], ['9', 'Select: rectangle ⇄ lasso'],
-    ['3 → Space', 'arm Node, then Space to drop one'],
-    ['5 → Space', 'arm Region'],
-    ['6 then 1–5', 'arm Figure: 1 rect · 2 square · 3 circle · 4 ellipse · 5 triangle → Space'],
+    ['1', 'Select (again: rectangle ⇄ lasso)'], ['2', 'Pen'], ['3', 'Highlighter'],
+    ['4', 'Eraser'], ['5', 'Text'], ['7', 'Arrow tool'], ['H', 'Move / pan (hand)'],
+    ['6 → Space', 'arm Node, then Space to drop one'],
+    ['8 → Space', 'arm Region'],
+    ['9 then 1–5', 'arm Figure: 1 rect · 2 square · 3 circle · 4 ellipse · 5 triangle → Space'],
   ]},
   { title: 'Touch & stylus', rows: [
     ['Stylus', 'draws / erases / selects with the current tool (pressure-sensitive)'],

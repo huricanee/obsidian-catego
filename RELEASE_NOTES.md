@@ -1,1 +1,8 @@
-- **Agent inbox in Markdown**: an assistant that can only write notes can now add text to a notebook through `Name.agent.md` — each `## id` section becomes a text block (Markdown and `$LaTeX$`), placed under what is already on the page.
+- **Highlight the text of a PDF**: the highlighter, when it starts on the text of a PDF page, marks the text itself (option "Text"). Select a highlight and use "Copy text" to copy its words.
+- **Highlights view**: the page strip can show only the pages with highlights; "Highlights → note" collects all highlighted text into `Name — highlights.md` next to the notebook, with links to the PDF pages.
+- **Finger scrolling**: inertia reworked — it now works for one- and two-finger scrolls and repeated flicks add up.
+- **Pen only**: once a stylus has been used on the device, fingers never draw or erase (remembered between sessions).
+- **Selection options** are a popup above or below the selection, opened by tapping the selected objects.
+- The options bar of Select and Eraser hides when the tool button is pressed again.
+- **Hotkeys** follow the toolbar: `1` select, `2` pen, `3` highlighter, `4` eraser, `5` text, `6` node, `7` arrow, `8` region, `9` figure, `H` move.
+- Sheet grid lines are now exactly where ink snaps.
